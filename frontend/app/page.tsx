@@ -352,6 +352,26 @@ function Dashboard() {
     const handleToggleStatus = async (pvid: string, imageIndex: number) => {
         if (!canWrite || !email) return;
 
+        // Optimistic Update
+        await mutate(async (currentData) => {
+            if (!currentData) return undefined;
+            // Deep copy to satisfy SWR immutability
+            const newData = JSON.parse(JSON.stringify(currentData));
+
+            const pvidItem = newData.items.find((item: PvidItem) => item.product_variant_id === pvid);
+            if (pvidItem) {
+                const img = pvidItem.images.find((img: ImageItem) => img.image_index === imageIndex);
+                if (img) {
+                    img.review_status = img.review_status === 'REVIEWED' ? 'NOT_REVIEWED' : 'REVIEWED';
+
+                    // Re-calc PVID status
+                    const allReviewed = pvidItem.images.every((i: ImageItem) => i.review_status === 'REVIEWED') && pvidItem.images.length > 0;
+                    pvidItem.pvid_review_status = allReviewed ? 'REVIEWED' : 'NOT_REVIEWED';
+                }
+            }
+            return newData;
+        }, { revalidate: false });
+
         try {
             const res = await fetch(`${API_BASE}/qc/toggle`, {
                 method: 'POST',
@@ -362,17 +382,33 @@ function Dashboard() {
                     actor: email
                 })
             });
-            if (!res.ok) throw new Error('Failed');
 
-            // Revalidate immediately to get fresh state from backend
-            mutate();
+            if (!res.ok) throw new Error('Failed');
+            // Success: Keep optimistic state. Do NOT refetch.
         } catch (e) {
+            // Failure: Revalidate to rollback
+            mutate();
             alert("Failed to toggle status");
         }
     };
 
     const handleToggleIssue = async (pvid: string, imageIndex: number, issueKey: string, value: boolean) => {
         if (!canWrite || !email) return;
+
+        // Optimistic Update
+        await mutate(async (currentData) => {
+            if (!currentData) return undefined;
+            const newData = JSON.parse(JSON.stringify(currentData));
+
+            const pvidItem = newData.items.find((item: PvidItem) => item.product_variant_id === pvid);
+            if (pvidItem) {
+                const img = pvidItem.images.find((img: ImageItem) => img.image_index === imageIndex);
+                if (img) {
+                    img.issues[issueKey] = value;
+                }
+            }
+            return newData;
+        }, { revalidate: false });
 
         try {
             const res = await fetch(`${API_BASE}/qc/issues/toggle`, {
@@ -387,8 +423,9 @@ function Dashboard() {
                 })
             });
             if (!res.ok) throw new Error('Failed');
-            mutate();
+            // Success: Keep optimistic state
         } catch (e) {
+            mutate();
             alert("Failed to toggle issue");
         }
     };

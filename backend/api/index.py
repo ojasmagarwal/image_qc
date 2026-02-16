@@ -456,6 +456,8 @@ def get_images(
         has_more=has_more,
     )
 
+from fastapi.responses import JSONResponse
+
 @router.post("/qc/toggle", response_model=ToggleResponse)
 def toggle_status(req: ToggleRequest):
     fs = get_fs_client()
@@ -510,7 +512,10 @@ def toggle_status(req: ToggleRequest):
     transaction = fs.transaction()
     new_status = update_in_transaction(transaction, doc_ref)
     
-    return ToggleResponse(new_status=new_status, event_id=event_id)
+    return JSONResponse(
+        content={"new_status": new_status, "event_id": event_id},
+        headers={"Cache-Control": "no-store"}
+    )
 
 @router.post("/qc/issues/toggle", response_model=IssueToggleResponse)
 def toggle_issue(req: IssueToggleRequest):
@@ -581,7 +586,10 @@ def toggle_issue(req: IssueToggleRequest):
     transaction = fs.transaction()
     update_in_transaction(transaction, doc_ref)
 
-    return IssueToggleResponse(status="ok", event_id=event_id)
+    return JSONResponse(
+        content={"status": "ok", "event_id": event_id},
+        headers={"Cache-Control": "no-store"}
+    )
 
 @router.get("/me/role", response_model=RoleResponse)
 def get_role(email: str):
