@@ -5,7 +5,7 @@ import logging
 from datetime import datetime
 from typing import Optional, List, Any, Dict
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, APIRouter
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, EmailStr
 from google.cloud import bigquery
@@ -15,6 +15,7 @@ from google.oauth2 import service_account
 # --- Configuration & Setup ---
 
 app = FastAPI(title="Image QC API", description="Backend for Image QC Module with BigQuery Read & Firestore Write")
+router = APIRouter(prefix="/api")
 
 # Environment Variables
 BQ_PROJECT = os.environ.get("BQ_PROJECT", "temporary-471207")
@@ -177,7 +178,7 @@ ISSUE_KEYS = [
 
 # --- Endpoints ---
 
-@app.get("/filters", response_model=FilterResponse)
+@router.get("/filters", response_model=FilterResponse)
 def get_filters():
     """
     Fetch distinct values for filters from BigQuery.
@@ -231,7 +232,7 @@ GROUP BY 2
         return FilterResponse(categories=["All"], brands=["All"], created_date_buckets=["All"])
 
 
-@app.get("/images", response_model=ImagesResponse)
+@router.get("/images", response_model=ImagesResponse)
 def get_images(
     page: int = Query(1, ge=1),
     status: Optional[str] = None,
@@ -447,7 +448,7 @@ def get_images(
         has_more=has_more,
     )
 
-@app.post("/qc/toggle", response_model=ToggleResponse)
+@router.post("/qc/toggle", response_model=ToggleResponse)
 def toggle_status(req: ToggleRequest):
     fs = get_fs_client()
     if not fs:
@@ -503,7 +504,7 @@ def toggle_status(req: ToggleRequest):
     
     return ToggleResponse(new_status=new_status, event_id=event_id)
 
-@app.post("/qc/issues/toggle", response_model=IssueToggleResponse)
+@router.post("/qc/issues/toggle", response_model=IssueToggleResponse)
 def toggle_issue(req: IssueToggleRequest):
     """
     Toggle a specific issue flag for an image (per product_variant_id, image_index).
@@ -574,7 +575,7 @@ def toggle_issue(req: IssueToggleRequest):
 
     return IssueToggleResponse(status="ok", event_id=event_id)
 
-@app.get("/me/role", response_model=RoleResponse)
+@router.get("/me/role", response_model=RoleResponse)
 def get_role(email: str):
     fs = get_fs_client()
     if not fs:
@@ -618,8 +619,10 @@ def verify_reviewer_access(email: str):
         logger.error(f"Error verifying access: {e}")
         raise HTTPException(status_code=500, detail="Authorization check failed.")
 
-@app.get("/health")
+@router.get("/health")
 def health():
     return {"status": "ok"}
+
+app.include_router(router)
 
 
