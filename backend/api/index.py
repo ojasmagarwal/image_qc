@@ -629,5 +629,5 @@ def verify_reviewer_access(email: str):
 @router.get("/health")
 def health():
     return {"status": "ok"}
-
+app.include_router(router)
 
