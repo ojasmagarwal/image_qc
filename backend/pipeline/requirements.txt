@@ -1,7 +1,6 @@
 fastapi
+pydantic[email]
+email-validator
 google-cloud-bigquery
 google-cloud-firestore
 google-auth
-google-auth-oauthlib
-google-auth-httplib2
-pydantic
