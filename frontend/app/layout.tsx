@@ -7,6 +7,10 @@ const inter = Inter({ subsets: ["latin"] });
 export const metadata: Metadata = {
     title: "Image QC",
     description: "Image Quality Control Dashboard",
+    icons: {
+        icon: '/brand/zepto-favicon.png',
+        shortcut: '/brand/zepto-favicon.png',
+    }
 };
 
 export default function RootLayout({

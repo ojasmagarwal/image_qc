@@ -236,12 +236,12 @@ GROUP BY 2
 def get_images(
     page: int = Query(1, ge=1),
     status: Optional[str] = None,
-    brand: Optional[str] = None,
+    brand: Optional[List[str]] = Query(None),
     l1: Optional[List[str]] = Query(None, alias="category_name"),
     l2: Optional[str] = Query(None, alias="subcategory_name"),
     l3: Optional[str] = Query(None, alias="l3_category_name"),
     pvid: Optional[str] = Query(None, alias="product_variant_id"),
-    created_bucket: Optional[str] = None
+    created_bucket: Optional[List[str]] = Query(None)
 ):
     """
     Fetch PVID-level items with nested images[] and filters.
@@ -256,10 +256,13 @@ def get_images(
     where_clauses = ["1=1"]
     params = []
     
-    if brand and brand != "All":
-        where_clauses.append("brand_name = @brand")
-        params.append(bigquery.ScalarQueryParameter("brand", "STRING", brand))
-        
+    # Filter Logic
+    if status and status != "All":
+        # Status filtering happens via JOIN on latest state, handled in query structure usually
+        # But for 'WHERE' clause, we might need adjustments if status is in the main table or joined.
+        # Assuming current logic handles status via the complex query construction below.
+        pass
+
     # Multi-select category
     if l1:
         # If "All" is in the list or list is empty/None, we ignore filter
@@ -269,6 +272,21 @@ def get_images(
         if valid_l1:
              where_clauses.append("category_name IN UNNEST(@categories)")
              params.append(bigquery.ArrayQueryParameter("categories", "STRING", valid_l1))
+
+    # Multi-select brand
+    if brand:
+        valid_brands = [b for b in brand if b != "All"]
+        if valid_brands:
+            where_clauses.append("brand_name IN UNNEST(@brands)")
+            params.append(bigquery.ArrayQueryParameter("brands", "STRING", valid_brands))
+            
+    # Multi-select created_bucket
+    if created_bucket:
+         valid_buckets = [b for b in created_bucket if b != "All"]
+         if valid_buckets:
+             # Handle NULLs in data if needed, or assume label is populated
+             where_clauses.append("COALESCE(created_date_bucket_label, 'More than 30 Days') IN UNNEST(@created_buckets)")
+             params.append(bigquery.ArrayQueryParameter("created_buckets", "STRING", valid_buckets))
 
     if l2:
         where_clauses.append("subcategory_name = @l2")

@@ -14,7 +14,13 @@ export function MultiSelectDropdown({
     label: string;
 }) {
     const [isOpen, setIsOpen] = useState(false);
+    const [search, setSearch] = useState('');
     const containerRef = useRef<HTMLDivElement>(null);
+
+    // Filter options based on search
+    const filteredOptions = options.filter(opt =>
+        opt.toLowerCase().includes(search.toLowerCase())
+    );
 
     useEffect(() => {
         const handleClickOutside = (event: MouseEvent) => {
@@ -55,7 +61,10 @@ export function MultiSelectDropdown({
             <label className="block text-xs font-semibold text-gray-500 mb-1 uppercase">{label}</label>
             <button
                 type="button"
-                onClick={() => setIsOpen(!isOpen)}
+                onClick={() => {
+                    setIsOpen(!isOpen);
+                    if (!isOpen) setSearch(''); // Clear search on open
+                }}
                 className="w-full text-left bg-white border border-gray-300 rounded-md py-2 px-3 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 flex justify-between items-center bg-gray-50"
             >
                 <div className="flex gap-1 flex-wrap truncate">
@@ -69,28 +78,47 @@ export function MultiSelectDropdown({
             </button>
 
             {isOpen && (
-                <div className="absolute z-50 mt-1 w-full min-w-[200px] bg-white border border-gray-300 rounded-md shadow-lg max-h-60 overflow-y-auto">
-                    {options.map(option => {
-                        const isSelected = selected.includes(option);
-                        return (
-                            <div
-                                key={option}
-                                className={cn(
-                                    "cursor-pointer px-3 py-2 text-sm hover:bg-gray-100 flex items-center gap-2",
-                                    isSelected && "bg-blue-50 text-blue-700"
-                                )}
-                                onClick={() => toggleOption(option)}
-                            >
-                                <div className={cn(
-                                    "w-4 h-4 border rounded flex items-center justify-center transition-colors",
-                                    isSelected ? "bg-blue-600 border-blue-600" : "border-gray-300"
-                                )}>
-                                    {isSelected && <Check size={12} className="text-white" />}
-                                </div>
-                                {option}
-                            </div>
-                        );
-                    })}
+                <div className="absolute z-50 mt-1 w-full min-w-[200px] bg-white border border-gray-300 rounded-md shadow-lg max-h-60 overflow-hidden flex flex-col">
+                    <div className="p-2 border-b bg-gray-50 sticky top-0 z-10">
+                        <div className="relative">
+                            <input
+                                type="text"
+                                placeholder="Search..."
+                                value={search}
+                                onChange={(e) => setSearch(e.target.value)}
+                                className="w-full p-1.5 pl-8 text-sm border rounded focus:outline-none focus:border-blue-500"
+                                autoFocus
+                            />
+                            <Search className="absolute left-2.5 top-2 h-3.5 w-3.5 text-gray-400" />
+                        </div>
+                    </div>
+                    <div className="overflow-y-auto flex-1">
+                        {filteredOptions.length > 0 ? (
+                            filteredOptions.map(option => {
+                                const isSelected = selected.includes(option);
+                                return (
+                                    <div
+                                        key={option}
+                                        className={cn(
+                                            "cursor-pointer px-3 py-2 text-sm hover:bg-gray-100 flex items-center gap-2",
+                                            isSelected && "bg-blue-50 text-blue-700"
+                                        )}
+                                        onClick={() => toggleOption(option)}
+                                    >
+                                        <div className={cn(
+                                            "w-4 h-4 border rounded flex items-center justify-center transition-colors flex-shrink-0",
+                                            isSelected ? "bg-blue-600 border-blue-600" : "border-gray-300"
+                                        )}>
+                                            {isSelected && <Check size={12} className="text-white" />}
+                                        </div>
+                                        {option}
+                                    </div>
+                                );
+                            })
+                        ) : (
+                            <div className="px-3 py-2 text-sm text-gray-400 text-center">No results</div>
+                        )}
+                    </div>
                 </div>
             )}
         </div>

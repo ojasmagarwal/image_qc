@@ -293,17 +293,17 @@ function Dashboard() {
 
     type FilterState = {
         status: string;
-        brand: string;
+        brand: string[];
         l1: string[];
-        bucket: string;
+        bucket: string[];
         pvid: string;
     }
 
     const [filters, setFilters] = useState<FilterState>({
         status: 'All',
-        brand: 'All',
+        brand: ['All'],
         l1: ['All'],
-        bucket: 'All',
+        bucket: ['All'],
         pvid: ''
     });
 
@@ -319,14 +319,20 @@ function Dashboard() {
         const p = new URLSearchParams();
         p.append('page', page.toString());
         if (filters.status && filters.status !== 'All') p.append('status', filters.status);
-        if (filters.brand && filters.brand !== 'All') p.append('brand', filters.brand);
 
-        // Handle array for category_name
+        // Handle arrays
+        if (filters.brand && !filters.brand.includes('All')) {
+            filters.brand.forEach(b => p.append('brand', b));
+        }
+
         if (filters.l1 && !filters.l1.includes('All')) {
             filters.l1.forEach(c => p.append('category_name', c));
         }
 
-        if (filters.bucket && filters.bucket !== 'All') p.append('created_bucket', filters.bucket);
+        if (filters.bucket && !filters.bucket.includes('All')) {
+            filters.bucket.forEach(b => p.append('created_bucket', b));
+        }
+
         if (filters.pvid) p.append('product_variant_id', filters.pvid);
 
         return p.toString();
@@ -446,7 +452,11 @@ function Dashboard() {
         return (
             <div className="flex h-screen items-center justify-center bg-gray-50">
                 <div className="w-full max-w-md p-8 bg-white rounded-lg shadow-md text-center">
-                    <h1 className="text-2xl font-bold mb-6">Image QC Login</h1>
+                    <div className="flex justify-center mb-6">
+                        {/* ZEPTO LOGO - Upload to public/brand/zepto-logo.png */}
+                        <img src="/brand/zepto-logo.png" alt="Zepto" className="h-12 w-auto" />
+                    </div>
+                    <h1 className="text-xl font-bold mb-6 text-gray-800">Image QC Login</h1>
                     <button
                         onClick={() => login()}
                         className="w-full bg-blue-600 text-white p-3 rounded hover:bg-blue-700 font-medium transition-colors flex items-center justify-center gap-2"
@@ -466,21 +476,24 @@ function Dashboard() {
     return (
         <div className="min-h-screen flex flex-col bg-gray-50">
             <header className="bg-white border-b px-6 py-4 flex justify-between items-center sticky top-0 z-10 shrink-0 shadow-sm">
-                <div>
-                    <h1 className="text-xl font-bold">Image QC</h1>
-                    <div className="text-sm text-gray-500">
-                        {email}
-                        <span className={cn(
-                            "ml-2 px-2 py-0.5 rounded text-xs uppercase font-bold",
+                <div className="flex items-center gap-3">
+                    {/* ZEPTO LOGO Header */}
+                    <img src="/brand/zepto-logo.png" alt="Zepto" className="h-8 w-auto cursor-pointer" onClick={() => window.location.href = '/'} />
+                    <span className="text-xl font-bold text-gray-300">|</span>
+                    <h1 className="text-lg font-semibold text-gray-700">Image QC</h1>
+                </div>
+                <div className="flex items-center gap-4">
+                    <div className="text-sm text-right">
+                        <div className="font-medium text-gray-900">{email}</div>
+                        <div className={cn(
+                            "inline-flex px-2 py-0.5 rounded text-[10px] uppercase font-bold mt-0.5",
                             canWrite ? "bg-green-100 text-green-700" : "bg-gray-100 text-gray-600"
                         )}>
                             {canWrite ? role : `${role} (Read Only)`}
-                        </span>
+                        </div>
                     </div>
-                </div>
-                <div className="flex items-center gap-4">
                     {isLoading && <Loader2 className="animate-spin text-gray-400" />}
-                    <button onClick={logout} className="text-gray-500 hover:text-red-600" title="Logout"><LogOut size={20} /></button>
+                    <button onClick={logout} className="text-gray-500 hover:text-red-600 p-2 rounded-full hover:bg-gray-100 transition-colors" title="Logout"><LogOut size={20} /></button>
                 </div>
             </header>
 
@@ -490,7 +503,7 @@ function Dashboard() {
                     <div className="flex justify-between items-center mb-4">
                         <h2 className="font-bold">Filters</h2>
                         <button
-                            onClick={() => { setFilters({ status: 'All', brand: 'All', l1: ['All'], bucket: 'All', pvid: '' }); setPage(1); }}
+                            onClick={() => { setFilters({ status: 'All', brand: ['All'], l1: ['All'], bucket: ['All'], pvid: '' }); setPage(1); }}
                             className="text-xs text-blue-600 hover:underline"
                         >
                             Clear
@@ -521,21 +534,16 @@ function Dashboard() {
                             </select>
                         </div>
 
-                        <div>
-                            <label className="text-xs font-semibold text-gray-500 uppercase">Created bucket</label>
-                            <select
-                                className="w-full mt-1 p-2 text-sm border rounded bg-gray-50"
-                                value={filters.bucket}
-                                onChange={e => updateFilter('bucket', e.target.value)}
-                            >
-                                {filterOptions?.created_date_buckets ? (
-                                    filterOptions.created_date_buckets.map(d => <option key={d} value={d}>{d}</option>)
-                                ) : <option>Loading...</option>}
-                            </select>
-                        </div>
+                        {/* Multi-Select Bucket */}
+                        <MultiSelectDropdown
+                            label="Created bucket"
+                            options={filterOptions?.created_date_buckets || ['All']}
+                            selected={filters.bucket}
+                            onChange={(val) => updateFilter('bucket', val)}
+                        />
 
-                        {/* Searchable Brand Dropdown */}
-                        <SearchableBrandDropdown
+                        {/* Multi-Select Brand */}
+                        <MultiSelectDropdown
                             label="Brand"
                             options={filterOptions?.brands || ['All']}
                             selected={filters.brand}
