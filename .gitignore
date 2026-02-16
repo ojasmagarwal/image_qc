@@ -11,9 +11,13 @@ backend/.venv/
 **/.venv/
 **/__pycache__/
 *.pyc
+venv/
+**/venv/
 
 # env files (secrets)
 .env
 .env.*
+**/.env
+**/.env.*
 **/.env
 **/.env.*
