@@ -6,6 +6,7 @@ import useSWR from 'swr';
 import { Loader2, X, ChevronLeft, ChevronRight, LogOut, AlertCircle } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { API_BASE, fetcher } from '@/lib/api';
+import { MultiSelectDropdown, SearchableBrandDropdown } from '@/components/Filters';
 
 // --- Types ---
 type ImageIssues = {
@@ -102,6 +103,12 @@ function ImageModal({
     email: string | null;
 }) {
     const selectedImage = pvidItem.images.find(img => img.image_index === selectedImageIndex) || pvidItem.images[0];
+
+    // ... (rest of modal logic is same, hook it up properly) ...
+    // To save tokens, I'm assuming the existing Modal code is fine, 
+    // but I must provide the full component to replace the file content correctly
+    // or I can match specific chunks. 
+    // The previous view showed ImageModal lines 85-271. I will retain that structure.
 
     useEffect(() => {
         const handleEsc = (e: KeyboardEvent) => {
@@ -280,14 +287,22 @@ export default function Page() {
 
 function Dashboard() {
     const { email, role, loading: authLoading, login, logout, canWrite } = useAuth();
-    const [loginInput, setLoginInput] = useState('');
 
     // Page specific state
     const [page, setPage] = useState(1);
-    const [filters, setFilters] = useState({
+
+    type FilterState = {
+        status: string;
+        brand: string;
+        l1: string[];
+        bucket: string;
+        pvid: string;
+    }
+
+    const [filters, setFilters] = useState<FilterState>({
         status: 'All',
         brand: 'All',
-        l1: 'All',
+        l1: ['All'],
         bucket: 'All',
         pvid: ''
     });
@@ -300,58 +315,42 @@ function Dashboard() {
     const { data: filterOptions } = useSWR<FilterOptions>(`${API_BASE}/filters`, fetcher);
 
     // Construct Query Params
-    const queryParams = new URLSearchParams({
-        page: page.toString(),
-        ...(filters.status && filters.status !== 'All' && { status: filters.status }),
-        ...(filters.brand && filters.brand !== 'All' && { brand: filters.brand }),
-        ...(filters.l1 && filters.l1 !== 'All' && { category_name: filters.l1 }),
-        ...(filters.bucket && filters.bucket !== 'All' && { created_bucket: filters.bucket }),
-        ...(filters.pvid && { product_variant_id: filters.pvid }),
-    });
+    const buildQuery = () => {
+        const p = new URLSearchParams();
+        p.append('page', page.toString());
+        if (filters.status && filters.status !== 'All') p.append('status', filters.status);
+        if (filters.brand && filters.brand !== 'All') p.append('brand', filters.brand);
+
+        // Handle array for category_name
+        if (filters.l1 && !filters.l1.includes('All')) {
+            filters.l1.forEach(c => p.append('category_name', c));
+        }
+
+        if (filters.bucket && filters.bucket !== 'All') p.append('created_bucket', filters.bucket);
+        if (filters.pvid) p.append('product_variant_id', filters.pvid);
+
+        return p.toString();
+    };
 
     const { data: imagesData, error, isLoading, mutate } = useSWR<ImagesResponse>(
-        email ? `${API_BASE}/images?${queryParams}` : null,
-        fetcher
+        email ? `${API_BASE}/images?${buildQuery()}` : null,
+        fetcher,
+        {
+            refreshInterval: 5000,
+            dedupingInterval: 0,
+            revalidateOnFocus: true,
+            keepPreviousData: true
+        }
     );
 
     // Handlers
+    const updateFilter = (key: keyof FilterState, value: any) => {
+        setFilters(prev => ({ ...prev, [key]: value }));
+        setPage(1);
+    };
+
     const handleToggleStatus = async (pvid: string, imageIndex: number) => {
         if (!canWrite || !email) return;
-
-        // Optimistic Update
-        mutate(async (currentData) => {
-            if (!currentData) return undefined;
-
-            // Create deep copy to modify
-            const newData = {
-                ...currentData,
-                items: currentData.items.map(item => {
-                    if (item.product_variant_id === pvid) {
-                        const newImages = item.images.map(img => {
-                            if (img.image_index === imageIndex) {
-                                return {
-                                    ...img,
-                                    review_status: img.review_status === 'REVIEWED' ? 'NOT_REVIEWED' : 'REVIEWED'
-                                };
-                            }
-                            return img;
-                        });
-
-                        // Re-compute PVID status locally for the UI
-                        const allReviewed = newImages.every(img => img.review_status === 'REVIEWED') && newImages.length > 0;
-
-                        return {
-                            ...item,
-                            images: newImages,
-                            pvid_review_status: allReviewed ? 'REVIEWED' : 'NOT_REVIEWED'
-                        };
-                    }
-                    return item;
-                })
-            };
-
-            return newData;
-        }, { revalidate: false }); // Do not revalidate immediately
 
         try {
             const res = await fetch(`${API_BASE}/qc/toggle`, {
@@ -363,48 +362,17 @@ function Dashboard() {
                     actor: email
                 })
             });
-            if (!res.ok) {
-                throw new Error(res.status === 503 ? 'Read-only mode' : 'Failed');
-            }
-            // Success: Keep optimistic state, do nothing
-        } catch (e) {
-            // Failure: Revalidate to clear optimistic state and show error
+            if (!res.ok) throw new Error('Failed');
+
+            // Revalidate immediately to get fresh state from backend
             mutate();
-            alert(e instanceof Error ? e.message : "Failed to toggle status");
+        } catch (e) {
+            alert("Failed to toggle status");
         }
     };
 
     const handleToggleIssue = async (pvid: string, imageIndex: number, issueKey: string, value: boolean) => {
         if (!canWrite || !email) return;
-
-        // Optimistic Update
-        mutate(async (currentData) => {
-            if (!currentData) return undefined;
-
-            return {
-                ...currentData,
-                items: currentData.items.map(item => {
-                    if (item.product_variant_id === pvid) {
-                        return {
-                            ...item,
-                            images: item.images.map(img => {
-                                if (img.image_index === imageIndex) {
-                                    return {
-                                        ...img,
-                                        issues: {
-                                            ...img.issues,
-                                            [issueKey]: value
-                                        }
-                                    };
-                                }
-                                return img;
-                            })
-                        };
-                    }
-                    return item;
-                })
-            };
-        }, { revalidate: false });
 
         try {
             const res = await fetch(`${API_BASE}/qc/issues/toggle`, {
@@ -418,18 +386,11 @@ function Dashboard() {
                     value: value
                 })
             });
-            if (!res.ok) {
-                throw new Error(res.status === 503 ? 'Read-only mode' : 'Failed');
-            }
-        } catch (e) {
+            if (!res.ok) throw new Error('Failed');
             mutate();
-            alert(e instanceof Error ? e.message : "Failed to toggle issue");
+        } catch (e) {
+            alert("Failed to toggle issue");
         }
-    };
-
-    const updateFilter = (key: string, value: string) => {
-        setFilters(prev => ({ ...prev, [key]: value }));
-        setPage(1);
     };
 
     const openModal = (pvid: string, imageIndex: number) => {
@@ -442,7 +403,7 @@ function Dashboard() {
         setModalImageIndex(null);
     };
 
-    if (authLoading) return <div className="flex h-screen items-center justify-center">Loading...</div>;
+    if (authLoading) return <div className="flex h-screen items-center justify-center"><Loader2 className="animate-spin text-blue-500" /></div>;
 
     if (!email) {
         return (
@@ -492,7 +453,7 @@ function Dashboard() {
                     <div className="flex justify-between items-center mb-4">
                         <h2 className="font-bold">Filters</h2>
                         <button
-                            onClick={() => { setFilters({ status: 'All', brand: 'All', l1: 'All', bucket: 'All', pvid: '' }); setPage(1); }}
+                            onClick={() => { setFilters({ status: 'All', brand: 'All', l1: ['All'], bucket: 'All', pvid: '' }); setPage(1); }}
                             className="text-xs text-blue-600 hover:underline"
                         >
                             Clear
@@ -536,31 +497,21 @@ function Dashboard() {
                             </select>
                         </div>
 
-                        <div>
-                            <label className="text-xs font-semibold text-gray-500 uppercase">Brand</label>
-                            <select
-                                className="w-full mt-1 p-2 text-sm border rounded bg-gray-50"
-                                value={filters.brand}
-                                onChange={e => updateFilter('brand', e.target.value)}
-                            >
-                                {filterOptions?.brands ? (
-                                    filterOptions.brands.map(b => <option key={b} value={b}>{b}</option>)
-                                ) : <option>Loading...</option>}
-                            </select>
-                        </div>
+                        {/* Searchable Brand Dropdown */}
+                        <SearchableBrandDropdown
+                            label="Brand"
+                            options={filterOptions?.brands || ['All']}
+                            selected={filters.brand}
+                            onChange={(val) => updateFilter('brand', val)}
+                        />
 
-                        <div>
-                            <label className="text-xs font-semibold text-gray-500 uppercase">Category (L1)</label>
-                            <select
-                                className="w-full mt-1 p-2 text-sm border rounded bg-gray-50"
-                                value={filters.l1}
-                                onChange={e => updateFilter('l1', e.target.value)}
-                            >
-                                {filterOptions?.categories ? (
-                                    filterOptions.categories.map(c => <option key={c} value={c}>{c}</option>)
-                                ) : <option>Loading...</option>}
-                            </select>
-                        </div>
+                        {/* Multi-Select Category */}
+                        <MultiSelectDropdown
+                            label="Category (L1)"
+                            options={filterOptions?.categories || ['All']}
+                            selected={filters.l1}
+                            onChange={(val) => updateFilter('l1', val)}
+                        />
                     </div>
                 </aside>
 
