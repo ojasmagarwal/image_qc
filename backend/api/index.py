@@ -15,6 +15,7 @@ from google.oauth2 import service_account
 # --- Configuration & Setup ---
 
 app = FastAPI(title="Image QC API", description="Backend for Image QC Module with BigQuery Read & Firestore Write")
+router = APIRouter(prefix="/api")
 
 # Environment Variables
 BQ_PROJECT = os.environ.get("BQ_PROJECT", "temporary-471207")
