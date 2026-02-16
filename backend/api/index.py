@@ -5,31 +5,16 @@ import logging
 from datetime import datetime
 from typing import Optional, List, Any, Dict
 
-from fastapi import FastAPI, HTTPException, Query, APIRouter
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, EmailStr
 from google.cloud import bigquery
 from google.cloud import firestore
 from google.oauth2 import service_account
-from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.responses import Response
 
 # --- Configuration & Setup ---
 
 app = FastAPI(title="Image QC API", description="Backend for Image QC Module with BigQuery Read & Firestore Write")
-router = APIRouter(prefix="/api")
-
-class NoCacheMiddleware(BaseHTTPMiddleware):
-    async def dispatch(self, request, call_next):
-        response: Response = await call_next(request)
-        # Only for API routes (your router prefix is /api)
-        if request.url.path.startswith("/api/"):
-            response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
-            response.headers["Pragma"] = "no-cache"
-            response.headers["Expires"] = "0"
-        return response
-
-app.add_middleware(NoCacheMiddleware)
 
 # Environment Variables
 BQ_PROJECT = os.environ.get("BQ_PROJECT", "temporary-471207")
@@ -192,7 +177,7 @@ ISSUE_KEYS = [
 
 # --- Endpoints ---
 
-@router.get("/filters", response_model=FilterResponse)
+@app.get("/filters", response_model=FilterResponse)
 def get_filters():
     """
     Fetch distinct values for filters from BigQuery.
@@ -246,12 +231,12 @@ GROUP BY 2
         return FilterResponse(categories=["All"], brands=["All"], created_date_buckets=["All"])
 
 
-@router.get("/images", response_model=ImagesResponse)
+@app.get("/images", response_model=ImagesResponse)
 def get_images(
     page: int = Query(1, ge=1),
     status: Optional[str] = None,
     brand: Optional[str] = None,
-    l1: Optional[str] = Query(None, alias="category_name"),
+    l1: Optional[List[str]] = Query(None, alias="category_name"),
     l2: Optional[str] = Query(None, alias="subcategory_name"),
     l3: Optional[str] = Query(None, alias="l3_category_name"),
     pvid: Optional[str] = Query(None, alias="product_variant_id"),
@@ -273,9 +258,17 @@ def get_images(
     if brand and brand != "All":
         where_clauses.append("brand_name = @brand")
         params.append(bigquery.ScalarQueryParameter("brand", "STRING", brand))
-    if l1 and l1 != "All":
-        where_clauses.append("category_name = @l1")
-        params.append(bigquery.ScalarQueryParameter("l1", "STRING", l1))
+        
+    # Multi-select category
+    if l1:
+        # If "All" is in the list or list is empty/None, we ignore filter
+        # But frontend might send specific items.
+        # Clean the list: remove "All"
+        valid_l1 = [c for c in l1 if c != "All"]
+        if valid_l1:
+             where_clauses.append("category_name IN UNNEST(@categories)")
+             params.append(bigquery.ArrayQueryParameter("categories", "STRING", valid_l1))
+
     if l2:
         where_clauses.append("subcategory_name = @l2")
         params.append(bigquery.ScalarQueryParameter("l2", "STRING", l2))
@@ -283,8 +276,8 @@ def get_images(
         where_clauses.append("l3_category_name = @l3")
         params.append(bigquery.ScalarQueryParameter("l3", "STRING", l3))
     if pvid:
-        # PVID filter (simple contains)
-        where_clauses.append("product_variant_id LIKE @pvid")
+        # PVID filter (case-insensitive contains)
+        where_clauses.append("LOWER(product_variant_id) LIKE LOWER(@pvid)")
         params.append(bigquery.ScalarQueryParameter("pvid", "STRING", f"%{pvid}%"))
     if created_bucket and created_bucket != "All":
         # Normalize nulls into 'More than 30 Days' bucket
@@ -462,7 +455,7 @@ def get_images(
         has_more=has_more,
     )
 
-@router.post("/qc/toggle", response_model=ToggleResponse)
+@app.post("/qc/toggle", response_model=ToggleResponse)
 def toggle_status(req: ToggleRequest):
     fs = get_fs_client()
     if not fs:
@@ -518,7 +511,7 @@ def toggle_status(req: ToggleRequest):
     
     return ToggleResponse(new_status=new_status, event_id=event_id)
 
-@router.post("/qc/issues/toggle", response_model=IssueToggleResponse)
+@app.post("/qc/issues/toggle", response_model=IssueToggleResponse)
 def toggle_issue(req: IssueToggleRequest):
     """
     Toggle a specific issue flag for an image (per product_variant_id, image_index).
@@ -589,7 +582,7 @@ def toggle_issue(req: IssueToggleRequest):
 
     return IssueToggleResponse(status="ok", event_id=event_id)
 
-@router.get("/me/role", response_model=RoleResponse)
+@app.get("/me/role", response_model=RoleResponse)
 def get_role(email: str):
     fs = get_fs_client()
     if not fs:
@@ -633,10 +626,8 @@ def verify_reviewer_access(email: str):
         logger.error(f"Error verifying access: {e}")
         raise HTTPException(status_code=500, detail="Authorization check failed.")
 
-@router.get("/health")
+@app.get("/health")
 def health():
     return {"status": "ok"}
-
-app.include_router(router)
 
 
