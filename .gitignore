@@ -1,2 +1,19 @@
-node_modules/
-node_modules/
+# Next.js build output
+frontend/.next/
+**/.next/
+
+# Node dependencies
+frontend/node_modules/
+**/node_modules/
+
+# Python venv / caches
+backend/.venv/
+**/.venv/
+**/__pycache__/
+*.pyc
+
+# env files (secrets)
+.env
+.env.*
+**/.env
+**/.env.*

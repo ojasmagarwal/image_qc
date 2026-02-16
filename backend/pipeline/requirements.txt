@@ -1,6 +1,7 @@
-
+fastapi
 google-cloud-bigquery
 google-cloud-firestore
-functions-framework
-cloudevents
-
+google-auth
+google-auth-oauthlib
+google-auth-httplib2
+pydantic

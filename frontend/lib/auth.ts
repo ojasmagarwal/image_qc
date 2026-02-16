@@ -19,7 +19,8 @@ export const authOptions: NextAuthOptions = {
             // 2. Allow if user exists in Firestore as reviewer/admin
             if (user.email) {
                 try {
-                    const apiBase = process.env.NEXT_PUBLIC_API_BASE || 'http://127.0.0.1:8000';
+                    // const apiBase = process.env.NEXT_PUBLIC_API_BASE || 'http://127.0.0.1:8000';
+                    const apiBase = process.env.NEXT_PUBLIC_API_BASE_URL || "http://127.0.0.1:8000";
                     const res = await fetch(`${apiBase}/me/role?email=${user.email}`);
                     if (res.ok) {
                         const data = await res.json();

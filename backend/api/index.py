@@ -618,7 +618,8 @@ def verify_reviewer_access(email: str):
         logger.error(f"Error verifying access: {e}")
         raise HTTPException(status_code=500, detail="Authorization check failed.")
 
-@app.get("/api/health")
+@app.get("/health")
 def health():
     return {"status": "ok"}
+
 
