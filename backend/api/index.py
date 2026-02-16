@@ -5,7 +5,7 @@ import logging
 from datetime import datetime
 from typing import Optional, List, Any, Dict
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, APIRouter
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, EmailStr
 from google.cloud import bigquery
