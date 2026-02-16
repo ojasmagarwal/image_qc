@@ -11,11 +11,25 @@ from pydantic import BaseModel, Field, EmailStr
 from google.cloud import bigquery
 from google.cloud import firestore
 from google.oauth2 import service_account
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.responses import Response
 
 # --- Configuration & Setup ---
 
 app = FastAPI(title="Image QC API", description="Backend for Image QC Module with BigQuery Read & Firestore Write")
 router = APIRouter(prefix="/api")
+
+class NoCacheMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request, call_next):
+        response: Response = await call_next(request)
+        # Only for API routes (your router prefix is /api)
+        if request.url.path.startswith("/api/"):
+            response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+            response.headers["Pragma"] = "no-cache"
+            response.headers["Expires"] = "0"
+        return response
+
+app.add_middleware(NoCacheMiddleware)
 
 # Environment Variables
 BQ_PROJECT = os.environ.get("BQ_PROJECT", "temporary-471207")
