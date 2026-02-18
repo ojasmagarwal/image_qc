@@ -91,42 +91,64 @@ class ToggleResponse(BaseModel):
     new_status: str
     event_id: str
 
+class RemarkRequest(BaseModel):
+    product_variant_id: str
+    image_index: int
+    actor: EmailStr
+    remark: Optional[str]
+
 class RemarkResponse(BaseModel):
     status: str
     event_id: str
-
-class RoleResponse(BaseModel):
-    email: str
-    role: str
-    exists: bool = False
 
 class FilterResponse(BaseModel):
     categories: List[str]
     brands: List[str]
     created_date_buckets: List[str]
 
+class RoleResponse(BaseModel):
+    email: str
+    role: str
+    exists: bool = False
+# --- Constants ---
+ISSUE_KEYS = {
+    "image_blur",
+    "cropped_image",
+    "mrp_present_in_image",
+    "image_quality",
+    "aspect_ratio",
+    "less_than_5_images",
+    "sequence_incorrect",
+    "duplicate_images"
+}
 
+# --- Pydantic Models ---
 class ImageIssues(BaseModel):
     image_blur: bool = False
     cropped_image: bool = False
     mrp_present_in_image: bool = False
     image_quality: bool = False
     aspect_ratio: bool = False
-
+    less_than_5_images: bool = False
+    sequence_incorrect: bool = False
+    duplicate_images: bool = False
 
 class ImageItem(BaseModel):
     image_index: int
     image_url: str
-    aspect_ratio_value: Optional[str] = None  # Stored as string like "1:1" in BigQuery
-    meta_3x4: Optional[str] = None
-    hide_padding: Optional[bool] = None
-    dpi: Optional[float] = None
-    white_bg: Optional[bool] = None
-    review_status: str
-    issues: ImageIssues
-    updated_by: Optional[str] = None
-    updated_at: Optional[datetime] = None
-
+    image_link_3x4: Optional[str] = None
+    aspect_ratio_value: Optional[str]
+    meta_3x4: Optional[str]
+    hide_padding: Optional[bool]
+    dpi: Optional[int]
+    white_bg: Optional[bool]
+    review_status: str = "NOT_REVIEWED"
+    issues: ImageIssues = Field(default_factory=ImageIssues)
+    remark: Optional[str] = None
+    updated_by: Optional[str]
+    updated_at: Optional[datetime]
+    last_updated_at: Optional[datetime] = None
+    last_updated_by: Optional[str] = None
 
 class PvidItem(BaseModel):
     product_variant_id: str
@@ -135,6 +157,7 @@ class PvidItem(BaseModel):
     category_name: str
     subcategory_name: str
     l3_category_name: str
+    packsize: Optional[str] = None
     created_date_bucket_label: Optional[str] = None
     pvid_review_status: str
     images: List[ImageItem]
@@ -319,9 +342,12 @@ def get_images(
           category_name,
           subcategory_name,
           l3_category_name,
+          CAST(packsize AS STRING) as packsize,
           COALESCE(created_date_bucket_label, 'More than 30 Days') AS created_date_bucket_label,
           image_url1, image_url2, image_url3, image_url4, image_url5,
           image_url6, image_url7, image_url8, image_url9, image_url10,
+          `3x4_image_link1`, `3x4_image_link2`, `3x4_image_link3`, `3x4_image_link4`, `3x4_image_link5`,
+          `3x4_image_link6`, `3x4_image_link7`, `3x4_image_link8`, `3x4_image_link9`, `3x4_image_link10`,
           aspect_ratio1, aspect_ratio2, aspect_ratio3, aspect_ratio4, aspect_ratio5,
           aspect_ratio6, aspect_ratio7, aspect_ratio8, aspect_ratio9, aspect_ratio10,
           meta_3x4_1, meta_3x4_2, meta_3x4_3, meta_3x4_4, meta_3x4_5,
@@ -331,7 +357,11 @@ def get_images(
           dpi_1, dpi_2, dpi_3, dpi_4, dpi_5,
           dpi_6, dpi_7, dpi_8, dpi_9, dpi_10,
           white_bg1, white_bg2, white_bg3, white_bg4, white_bg5,
-          white_bg6, white_bg7, white_bg8, white_bg9, white_bg10
+          white_bg6, white_bg7, white_bg8, white_bg9, white_bg10,
+          image1_last_updated_at, image2_last_updated_at, image3_last_updated_at, image4_last_updated_at, image5_last_updated_at,
+          image6_last_updated_at, image7_last_updated_at, image8_last_updated_at, image9_last_updated_at, image10_last_updated_at,
+          image1_updated_by, image2_updated_by, image3_updated_by, image4_updated_by, image5_updated_by,
+          image6_updated_by, image7_updated_by, image8_updated_by, image9_updated_by, image10_updated_by
         FROM `{table_id}`
         WHERE {where_sql}
         ORDER BY product_variant_id
@@ -362,6 +392,7 @@ def get_images(
                 "category_name": row.get("category_name"),
                 "subcategory_name": row.get("subcategory_name"),
                 "l3_category_name": row.get("l3_category_name"),
+                "packsize": row.get("packsize"),
                 "created_date_bucket_label": row.get("created_date_bucket_label"),
                 "images": [],
             },
@@ -377,11 +408,14 @@ def get_images(
             img = {
                 "image_index": idx,
                 "image_url": url,
+                "image_link_3x4": row.get(f"3x4_image_link{idx}"),
                 "aspect_ratio_value": row.get(f"aspect_ratio{idx}"),
                 "meta_3x4": row.get(f"meta_3x4_{idx}"),
                 "hide_padding": row.get(f"hide_padding{idx}"),
                 "dpi": row.get(f"dpi_{idx}"),
                 "white_bg": row.get(f"white_bg{idx}"),
+                "last_updated_at": row.get(f"image{idx}_last_updated_at"),
+                "last_updated_by": row.get(f"image{idx}_updated_by"),
             }
             item["images"].append(img)
 
@@ -423,12 +457,16 @@ def get_images(
                 mrp_present_in_image=bool(issues_state.get("mrp_present_in_image", False)),
                 image_quality=bool(issues_state.get("image_quality", False)),
                 aspect_ratio=bool(issues_state.get("aspect_ratio", False)),
+                less_than_5_images=bool(issues_state.get("less_than_5_images", False)),
+                sequence_incorrect=bool(issues_state.get("sequence_incorrect", False)),
+                duplicate_images=bool(issues_state.get("duplicate_images", False)),
             )
 
             merged_images.append(
                 ImageItem(
                     image_index=img["image_index"],
                     image_url=img["image_url"],
+                    image_link_3x4=img["image_link_3x4"],
                     aspect_ratio_value=img.get("aspect_ratio_value"),
                     meta_3x4=img.get("meta_3x4"),
                     hide_padding=img.get("hide_padding"),
@@ -436,34 +474,42 @@ def get_images(
                     white_bg=img.get("white_bg"),
                     review_status=review_status,
                     issues=issues,
+                    remark=state.get("remark"),
                     updated_by=state.get("updated_by"),
                     updated_at=state.get("updated_at"),
+                    last_updated_at=img.get("last_updated_at"),
+                    last_updated_by=img.get("last_updated_by"),
                 )
             )
 
         # Compute PVID status
-        pvid_review_status = "REVIEWED" if all_images_reviewed and merged_images else "NOT_REVIEWED"
+        # If any image is reviewed, does that mean PVID is partially reviewed? 
+        # Current logic: ALL images must be REVIEWED for PVID to be REVIEWED.
+        all_reviewed_flag = all(img.review_status == "REVIEWED" for img in merged_images) if merged_images else False
+        pvid_review_status = "REVIEWED" if all_reviewed_flag else "NOT_REVIEWED"
 
         # Apply Status Filter at PVID level
         if status and status != "All":
-            if status == "REVIEWED" and pvid_review_status != "REVIEWED":
-                continue
-            if status == "NOT_REVIEWED" and pvid_review_status == "REVIEWED":
+            if status != pvid_review_status:
                 continue
 
         result_items.append(
             PvidItem(
-                product_variant_id=raw_item["product_variant_id"],
-                brand_name=raw_item["brand_name"],
+                product_variant_id=pvid_val,
                 product_name=raw_item["product_name"],
+                brand_name=raw_item["brand_name"],
                 category_name=raw_item["category_name"],
                 subcategory_name=raw_item["subcategory_name"],
                 l3_category_name=raw_item["l3_category_name"],
+                packsize=raw_item["packsize"],
                 created_date_bucket_label=raw_item["created_date_bucket_label"],
                 pvid_review_status=pvid_review_status,
                 images=merged_images,
             )
         )
+
+    # Sort if needed (optional)
+    # result_items.sort(key=lambda x: x.product_variant_id)
 
     has_more = len(bq_rows) == limit
 
@@ -597,6 +643,73 @@ def toggle_issue(req: IssueToggleRequest):
                 "old_issue_value": old_value,
                 "new_issue_value": new_value,
                 "issues_snapshot": current_issues,
+                "actor": req.actor,
+            },
+        )
+
+    transaction = fs.transaction()
+    update_in_transaction(transaction, doc_ref)
+
+    return JSONResponse(
+        content={"status": "ok", "event_id": event_id},
+        headers={"Cache-Control": "no-store"}
+    )
+
+@router.post("/qc/remark", response_model=RemarkResponse)
+def toggle_remark(req: RemarkRequest):
+    """
+    Update the remark for a specific image.
+    """
+    fs = get_fs_client()
+    if not fs:
+        raise HTTPException(status_code=503, detail="Firestore not configured. System is Read-Only.")
+
+    doc_id = get_firestore_doc_id(req.product_variant_id, req.image_index)
+    doc_ref = fs.collection("qc_current_state").document(doc_id)
+
+    event_id = str(uuid.uuid4())
+    event_ts = datetime.utcnow()
+
+    @firestore.transactional
+    def update_in_transaction(transaction, doc_ref):
+        snapshot = doc_ref.get(transaction=transaction)
+        current_status = "NOT_REVIEWED"
+        old_remark = None
+
+        if snapshot.exists:
+            data = snapshot.to_dict()
+            current_status = data.get("review_status", "NOT_REVIEWED")
+            old_remark = data.get("remark")
+
+        if old_remark == req.remark:
+             return # No change
+
+        # Write to Current State
+        transaction.set(
+            doc_ref,
+            {
+                "product_variant_id": req.product_variant_id,
+                "image_index": req.image_index,
+                "review_status": current_status,
+                "remark": req.remark,
+                "updated_by": req.actor,
+                "updated_at": event_ts,
+            },
+            merge=True,
+        )
+
+        # Write to Event Log
+        log_ref = fs.collection("qc_event_log").document(event_id)
+        transaction.set(
+            log_ref,
+            {
+                "event_id": event_id,
+                "event_ts": event_ts,
+                "event_type": "REMARK_CHANGE",
+                "product_variant_id": req.product_variant_id,
+                "image_index": req.image_index,
+                "old_remark": old_remark,
+                "new_remark": req.remark,
                 "actor": req.actor,
             },
         )
