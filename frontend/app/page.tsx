@@ -83,6 +83,7 @@ type PvidItem = {
     category_name: string;
     subcategory_name: string;
     l3_category_name: string;
+    packsize?: string | number | null;
     created_date_bucket_label: string | null;
     pvid_review_status: string;
     images: ImageItem[];
