@@ -155,6 +155,7 @@ type PvidItem = {
     image_3x4_count: number | null;
     transparent_image_exists: boolean | null;
     transparent_image_link: string | null;
+    packsize: string | null; 
     images: ImageItem[];
 };
 
