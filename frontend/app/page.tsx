@@ -36,42 +36,108 @@ type ImageItem = {
     updated_at: string | null;
     last_updated_at: string | null;
     last_updated_by: string | null;
+    image_format: string | null;
 };
 
 // ... existing code ...
 
-const PvidHeader = ({ item }: { item: PvidItem }) => {
+const PvidHeader = ({ item, onOpenModal, onOpenTransparent }: { item: PvidItem; onOpenModal: () => void; onOpenTransparent: (url: string) => void }) => {
     return (
-        <div className="grid grid-cols-3 gap-y-2 gap-x-4 text-sm mb-4 border-b pb-3">
-            {/* Row 1 */}
-            <div className="flex flex-col">
-                <span className="text-[10px] text-gray-500 uppercase font-bold">PVID</span>
-                <span className="font-mono font-medium truncate" title={item.product_variant_id}>{item.product_variant_id}</span>
-            </div>
-            <div className="flex flex-col">
-                <span className="text-[10px] text-gray-500 uppercase font-bold">Brand</span>
-                <span className="truncate" title={item.brand_name}>{item.brand_name || '-'}</span>
-            </div>
-            <div className="flex flex-col">
-                <span className="text-[10px] text-gray-500 uppercase font-bold">Created Bucket</span>
-                <span className="truncate">{item.created_date_bucket_label || '-'}</span>
-            </div>
+        <div className="flex flex-col gap-3 mb-4">
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-y-2 gap-x-4 text-sm">
+                {/* Row 1 */}
+                <div className="flex flex-col">
+                    <span className="text-[10px] text-gray-500 uppercase font-bold">PVID</span>
+                    <span className="font-mono font-medium truncate" title={item.product_variant_id}>{item.product_variant_id}</span>
+                </div>
+                <div className="flex flex-col">
+                    <span className="text-[10px] text-gray-500 uppercase font-bold">Brand</span>
+                    <span className="truncate" title={item.brand_name}>{item.brand_name || '-'}</span>
+                </div>
+                <div className="flex flex-col">
+                    <span className="text-[10px] text-gray-500 uppercase font-bold">Created Bucket</span>
+                    <span className="truncate">{item.created_date_bucket_label || '-'}</span>
+                </div>
+                <div className="flex flex-col items-end justify-center">
+                    <button
+                        onClick={onOpenModal}
+                        className="p-1 rounded-md transition-colors hover:bg-gray-100"
+                        title="Open Image Modal"
+                    >
+                        <img
+                            src="brand/icons8-arrow-100.png"
+                            alt="Open"
+                            className="w-7 h-7 hover:opacity-80 transition-opacity"
+                        />
+                    </button>
+                </div>
 
-            {/* Row 2 */}
-            <div className="flex flex-col">
-                <span className="text-[10px] text-gray-500 uppercase font-bold">Category (L1)</span>
-                <span className="truncate" title={item.category_name}>{item.category_name || '-'}</span>
-            </div>
-            <div className="flex flex-col">
-                <span className="text-[10px] text-gray-500 uppercase font-bold">Subcategory (L2)</span>
-                <span className="truncate" title={item.subcategory_name}>{item.subcategory_name || '-'}</span>
-            </div>
-            <div className="flex flex-col">
-                <span className="text-[10px] text-gray-500 uppercase font-bold">L3 Category</span>
-                <span className="truncate" title={item.l3_category_name}>{item.l3_category_name || '-'}</span>
+                {/* Row 2 */}
+                <div className="flex flex-col">
+                    <span className="text-[10px] text-gray-500 uppercase font-bold">Category (L1)</span>
+                    <span className="truncate" title={item.category_name}>{item.category_name || '-'}</span>
+                </div>
+                <div className="flex flex-col">
+                    <span className="text-[10px] text-gray-500 uppercase font-bold">Subcategory (L2)</span>
+                    <span className="truncate" title={item.subcategory_name}>{item.subcategory_name || '-'}</span>
+                </div>
+                <div className="flex flex-col">
+                    <span className="text-[10px] text-gray-500 uppercase font-bold">L3 Category</span>
+                    <span className="truncate" title={item.l3_category_name}>{item.l3_category_name || '-'}</span>
+                </div>
+                <div className="flex flex-col">
+                    {/* Spacer for alignment or status */}
+                </div>
+
+                {/* Row 3 - New Metadata */}
+                <div className="flex flex-col">
+                    <span className="text-[10px] text-gray-500 uppercase font-bold">Image Count</span>
+                    <span className="truncate">{item.image_count ?? '-'}</span>
+                </div>
+                <div className="flex flex-col">
+                    <span className="text-[10px] text-gray-500 uppercase font-bold">3x4 Count</span>
+                    <span className="truncate">{item.image_3x4_count ?? '-'}</span>
+                </div>
+                <div className="flex flex-col">
+                    <span className="text-[10px] text-gray-500 uppercase font-bold">Transparent Image</span>
+                    <div className="flex items-center gap-2">
+                        <span className={cn("text-xs font-medium px-1.5 py-0.5 rounded", item.transparent_image_exists === true ? "bg-green-50 text-green-700" : item.transparent_image_exists === false ? "bg-red-50 text-red-700" : "")}>
+                            {item.transparent_image_exists === true ? "TRUE" : item.transparent_image_exists === false ? "FALSE" : "-"}
+                        </span>
+                        {item.transparent_image_exists && item.transparent_image_link && (
+                            <button
+                                onClick={() => onOpenTransparent(item.transparent_image_link!)}
+                                className="text-xs bg-gray-100 hover:bg-gray-200 text-gray-700 px-2 py-0.5 rounded border transition-colors"
+                            >
+                                View
+                            </button>
+                        )}
+                    </div>
+                </div>
+                <div className="flex flex-col justify-end items-end">
+                    <span className={cn(
+                        "px-3 py-1 rounded-full text-xs font-bold border",
+                        item.pvid_review_status === 'REVIEWED'
+                            ? "bg-green-100 text-green-800 border-green-200"
+                            : "bg-red-100 text-red-800 border-red-200"
+                    )}>
+                        {item.pvid_review_status === 'REVIEWED' ? "REVIEWED" : "NOT REVIEWED"}
+                    </span>
+                </div>
             </div>
         </div>
+    );
+};
 
+const TransparentImageModal = ({ url, onClose }: { url: string; onClose: () => void }) => {
+    if (!url) return null;
+    return (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm" onClick={onClose}>
+            <div className="relative bg-white rounded-lg p-2 max-w-[90vw] max-h-[90vh] flex flex-col items-center shadow-2xl" onClick={e => e.stopPropagation()}>
+                <button onClick={onClose} className="absolute -top-3 -right-3 p-1.5 bg-white text-gray-500 rounded-full hover:bg-gray-100 shadow-md border"><X size={16} /></button>
+                <img src={url} alt="Transparent" className="max-w-full max-h-[85vh] object-contain rounded" />
+            </div>
+        </div>
     );
 };
 
@@ -83,9 +149,12 @@ type PvidItem = {
     category_name: string;
     subcategory_name: string;
     l3_category_name: string;
-    packsize?: string | number | null;
     created_date_bucket_label: string | null;
     pvid_review_status: string;
+    image_count: number | null;
+    image_3x4_count: number | null;
+    transparent_image_exists: boolean | null;
+    transparent_image_link: string | null;
     images: ImageItem[];
 };
 
@@ -359,23 +428,48 @@ function ImageModal({
                         {/* Review Status Toggle */}
                         <div className="flex items-center justify-between">
                             <span className="text-sm font-medium text-gray-500">Status</span>
-                            <button
-                                onClick={() => onToggleStatus(pvidItem.product_variant_id, selectedImage.image_index)}
-                                disabled={!canWrite}
+                            <div
+                                onClick={() => canWrite && onToggleStatus(pvidItem.product_variant_id, selectedImage.image_index)}
                                 className={cn(
-                                    "text-xs font-bold px-4 py-1.5 rounded-full transition-all border flex items-center gap-1.5",
-                                    !canWrite && "opacity-50 cursor-not-allowed",
-                                    selectedImage.review_status === 'REVIEWED'
-                                        ? "bg-green-50 text-green-700 border-green-200 hover:bg-green-100"
-                                        : "bg-red-50 text-red-700 border-red-200 hover:bg-red-100"
+                                    "relative flex items-center bg-gray-100 rounded-full p-1 cursor-pointer w-[180px] border h-9 select-none",
+                                    !canWrite && "opacity-50 cursor-not-allowed pointer-events-none"
                                 )}
+                                role="switch"
+                                aria-checked={selectedImage.review_status === 'REVIEWED'}
+                                aria-label={selectedImage.review_status === 'REVIEWED' ? "Status: Reviewed" : "Status: Pending"}
+                                tabIndex={canWrite ? 0 : -1}
+                                onKeyDown={(e) => {
+                                    if (e.key === 'Enter' || e.key === ' ') {
+                                        if (canWrite) onToggleStatus(pvidItem.product_variant_id, selectedImage.image_index);
+                                    }
+                                }}
                             >
-                                {selectedImage.review_status === 'REVIEWED' ? (
-                                    <> <Check size={12} /> REVIEWED </>
-                                ) : (
-                                    <> <X size={12} /> PENDING </>
-                                )}
-                            </button>
+                                {/* Sliding Pill Background */}
+                                <div
+                                    className={cn(
+                                        "absolute top-1 bottom-1 rounded-full transition-all duration-300 shadow-sm",
+                                        selectedImage.review_status === 'REVIEWED'
+                                            ? "left-1/2 right-1 bg-green-500"
+                                            : "left-1 right-1/2 bg-red-500"
+                                    )}
+                                />
+
+                                {/* Labels Layer */}
+                                <div className="relative z-10 flex w-full text-center">
+                                    <div className={cn(
+                                        "w-1/2 text-xs font-bold transition-colors flex items-center justify-center gap-1",
+                                        selectedImage.review_status !== 'REVIEWED' ? "text-white" : "text-gray-400"
+                                    )}>
+                                        {selectedImage.review_status !== 'REVIEWED' && <X size={12} />} PENDING
+                                    </div>
+                                    <div className={cn(
+                                        "w-1/2 text-xs font-bold transition-colors flex items-center justify-center gap-1",
+                                        selectedImage.review_status === 'REVIEWED' ? "text-white" : "text-gray-400"
+                                    )}>
+                                        {selectedImage.review_status === 'REVIEWED' && <Check size={12} />} REVIEWED
+                                    </div>
+                                </div>
+                            </div>
                         </div>
                     </div>
 
@@ -415,6 +509,10 @@ function ImageModal({
                                 <div className="border border-gray-200 bg-gray-50 rounded-md px-3 py-2">
                                     <span className="block text-[10px] font-bold text-gray-400 uppercase">Last Updated By</span>
                                     <span className="text-sm font-medium text-gray-800 break-all text-xs" title={selectedImage.last_updated_by || ""}>{selectedImage.last_updated_by || "-"}</span>
+                                </div>
+                                <div className="border border-gray-200 bg-gray-50 rounded-md px-3 py-2">
+                                    <span className="block text-[10px] font-bold text-gray-400 uppercase">Image Format</span>
+                                    <span className="text-sm font-medium text-gray-800 break-all">{selectedImage.image_format || "-"}</span>
                                 </div>
                             </div>
                         </div>
@@ -519,9 +617,17 @@ function Dashboard() {
         pvid: ''
     });
 
+    const [pendingFilters, setPendingFilters] = useState<FilterState>(filters);
+
+    // Sync pending with active when active changes (e.g. clear)
+    useEffect(() => {
+        setPendingFilters(filters);
+    }, [filters]);
+
     // Modal state
     const [modalPvid, setModalPvid] = useState<string | null>(null);
     const [modalImageIndex, setModalImageIndex] = useState<number | null>(null);
+    const [transparentModalUrl, setTransparentModalUrl] = useState<string | null>(null);
 
     // Fetch Filter Options
     const { data: filterOptions } = useSWR<FilterOptions>(`${API_BASE}/filters`, fetcher);
@@ -545,7 +651,13 @@ function Dashboard() {
             filters.bucket.forEach(b => p.append('created_bucket', b));
         }
 
-        if (filters.pvid) p.append('product_variant_id', filters.pvid);
+        if (filters.pvid) {
+            const ids = filters.pvid.split(/[\s,]+/).map(s => s.trim()).filter(Boolean);
+            const uniqueIds = Array.from(new Set(ids));
+            if (uniqueIds.length > 0) {
+                uniqueIds.forEach(id => p.append('product_variant_id', id));
+            }
+        }
 
         return p.toString();
     };
@@ -563,7 +675,11 @@ function Dashboard() {
 
     // Handlers
     const updateFilter = (key: keyof FilterState, value: any) => {
-        setFilters(prev => ({ ...prev, [key]: value }));
+        setPendingFilters(prev => ({ ...prev, [key]: value }));
+    };
+
+    const applyFilters = () => {
+        setFilters(pendingFilters);
         setPage(1);
     };
 
@@ -715,7 +831,12 @@ function Dashboard() {
                     <div className="flex justify-between items-center mb-4">
                         <h2 className="font-bold">Filters</h2>
                         <button
-                            onClick={() => { setFilters({ status: 'All', brand: ['All'], l1: ['All'], bucket: ['All'], pvid: '' }); setPage(1); }}
+                            onClick={() => {
+                                const defaults = { status: 'All', brand: ['All'], l1: ['All'], bucket: ['All'], pvid: '' };
+                                setFilters(defaults);
+                                setPendingFilters(defaults);
+                                setPage(1);
+                            }}
                             className="text-xs text-blue-600 hover:underline"
                         >
                             Clear
@@ -725,10 +846,10 @@ function Dashboard() {
                     <div className="space-y-4">
                         <div>
                             <label className="text-xs font-semibold text-gray-500 uppercase">Variant ID</label>
-                            <input
-                                className="w-full mt-1 p-2 text-sm border rounded bg-gray-50"
-                                placeholder="Product Variant ID"
-                                value={filters.pvid}
+                            <textarea
+                                className="w-full mt-1 p-2 text-sm border rounded bg-gray-50 h-20"
+                                placeholder="Paste PVIDs (one per line or comma separated)"
+                                value={pendingFilters.pvid}
                                 onChange={e => updateFilter('pvid', e.target.value)}
                             />
                         </div>
@@ -737,7 +858,7 @@ function Dashboard() {
                             <label className="text-xs font-semibold text-gray-500 uppercase">Status</label>
                             <select
                                 className="w-full mt-1 p-2 text-sm border rounded bg-gray-50"
-                                value={filters.status}
+                                value={pendingFilters.status}
                                 onChange={e => updateFilter('status', e.target.value)}
                             >
                                 <option value="All">All</option>
@@ -750,7 +871,7 @@ function Dashboard() {
                         <MultiSelectDropdown
                             label="Created bucket"
                             options={filterOptions?.created_date_buckets || ['All']}
-                            selected={filters.bucket}
+                            selected={pendingFilters.bucket}
                             onChange={(val) => updateFilter('bucket', val)}
                         />
 
@@ -758,7 +879,7 @@ function Dashboard() {
                         <MultiSelectDropdown
                             label="Brand"
                             options={filterOptions?.brands || ['All']}
-                            selected={filters.brand}
+                            selected={pendingFilters.brand}
                             onChange={(val) => updateFilter('brand', val)}
                         />
 
@@ -766,9 +887,16 @@ function Dashboard() {
                         <MultiSelectDropdown
                             label="Category (L1)"
                             options={filterOptions?.categories || ['All']}
-                            selected={filters.l1}
+                            selected={pendingFilters.l1}
                             onChange={(val) => updateFilter('l1', val)}
                         />
+
+                        <button
+                            onClick={applyFilters}
+                            className="w-full bg-blue-600 text-white p-2 rounded hover:bg-blue-700 font-medium transition-colors mt-4"
+                        >
+                            Apply Filters
+                        </button>
                     </div>
                 </aside>
 
@@ -788,17 +916,17 @@ function Dashboard() {
                                 key={item.product_variant_id}
                                 className="bg-white border rounded-lg shadow-sm hover:shadow-md transition-shadow p-4"
                             >
-                                <div className="flex gap-4">
+                                <div className="flex gap-4 items-stretch h-full">
                                     {/* Left: Horizontal Image Strip */}
-                                    <div className="flex-shrink-0">
-                                        <div className="flex gap-2 overflow-x-auto scrollbar-hide" style={{ width: '400px', maxWidth: '100%' }}>
+                                    <div className="flex-shrink-0 w-[400px] max-w-[40%] flex flex-col">
+                                        <div className="flex-1 flex items-center gap-2 overflow-x-auto scrollbar-hide scroll-smooth">
                                             {item.images.map(img => (
                                                 <button
                                                     key={img.image_index}
                                                     onClick={() => openModal(item.product_variant_id, img.image_index)}
                                                     className={cn(
-                                                        "relative border rounded-md bg-gray-50 flex-shrink-0",
-                                                        "w-24 h-24 flex items-center justify-center hover:border-blue-400 transition-colors"
+                                                        "relative border rounded-md bg-white flex-shrink-0",
+                                                        "w-24 h-24 md:w-36 md:h-36 flex items-center justify-center hover:border-blue-400 transition-colors"
                                                     )}
                                                 >
                                                     <img
@@ -816,32 +944,15 @@ function Dashboard() {
 
                                     {/* Right: PVID-level Fields */}
                                     {/* Right: PVID-level Fields */}
+                                    {/* Right: PVID-level Fields */}
                                     <div className="flex-1 min-w-0">
-                                        <PvidHeader item={item} />
+                                        <PvidHeader
+                                            item={item}
+                                            onOpenModal={() => openModal(item.product_variant_id, item.images[0]?.image_index || 1)}
+                                            onOpenTransparent={(url) => setTransparentModalUrl(url)}
+                                        />
 
-                                        {/* Status Chip (Optional, if not covered in Header or if needed here as well) */}
-                                        {/* The new PVIDHeader covers cols but maybe not the status chip in the same way? 
-                                             Wait, the design request said:
-                                             Row 1: PVID | Brand | Created bucket
-                                             Row 2: Category (L1) | Subcategory (L2) | L3
-                                             It did NOT mention status. 
-                                             The original code had status. I should probably keep status visible?
-                                             The user request D says "row 1... row 2..." strictly.
-                                             But removing status from the list view might be bad.
-                                             I'll add the status chip below the header or integrated.
-                                             Actually, status is quite important.
-                                             I'll render the status chip below the PVIDHeader for now.
-                                         */}
-                                        <div className="flex justify-end mt-2">
-                                            <span className={cn(
-                                                "px-3 py-1 rounded-full text-xs font-bold border",
-                                                item.pvid_review_status === 'REVIEWED'
-                                                    ? "bg-green-100 text-green-800 border-green-200"
-                                                    : "bg-red-100 text-red-800 border-red-200"
-                                            )}>
-                                                {item.pvid_review_status === 'REVIEWED' ? "REVIEWED" : "NOT REVIEWED"}
-                                            </span>
-                                        </div>
+                                        {/* Status Chip Moved to PvidHeader */}
                                     </div>
                                 </div>
                             </div>
@@ -898,6 +1009,14 @@ function Dashboard() {
                     onToggleIssue={handleToggleIssue}
                     canWrite={canWrite}
                     email={email}
+                />
+            )}
+
+            {/* Transparent Image Modal */}
+            {transparentModalUrl && (
+                <TransparentImageModal
+                    url={transparentModalUrl}
+                    onClose={() => setTransparentModalUrl(null)}
                 />
             )}
         </div>
