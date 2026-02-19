@@ -149,6 +149,7 @@ class ImageItem(BaseModel):
     updated_at: Optional[datetime]
     last_updated_at: Optional[datetime] = None
     last_updated_by: Optional[str] = None
+    image_format: Optional[str] = None
 
 class PvidItem(BaseModel):
     product_variant_id: str
@@ -160,6 +161,10 @@ class PvidItem(BaseModel):
     packsize: Optional[str] = None
     created_date_bucket_label: Optional[str] = None
     pvid_review_status: str
+    image_count: Optional[int] = None
+    image_3x4_count: Optional[int] = None
+    transparent_image_exists: Optional[bool] = None
+    transparent_image_link: Optional[str] = None
     images: List[ImageItem]
 
 
@@ -263,7 +268,7 @@ def get_images(
     l1: Optional[List[str]] = Query(None, alias="category_name"),
     l2: Optional[str] = Query(None, alias="subcategory_name"),
     l3: Optional[str] = Query(None, alias="l3_category_name"),
-    pvid: Optional[str] = Query(None, alias="product_variant_id"),
+    pvid: Optional[List[str]] = Query(None, alias="product_variant_id"),
     created_bucket: Optional[List[str]] = Query(None)
 ):
     """
@@ -318,9 +323,22 @@ def get_images(
         where_clauses.append("l3_category_name = @l3")
         params.append(bigquery.ScalarQueryParameter("l3", "STRING", l3))
     if pvid:
-        # PVID filter (case-insensitive contains)
-        where_clauses.append("LOWER(product_variant_id) LIKE LOWER(@pvid)")
-        params.append(bigquery.ScalarQueryParameter("pvid", "STRING", f"%{pvid}%"))
+        # PVID filter: if list has > 1 item, use IN. If 1 item, use LIKE for partial match (or exact if preferred, but keeping LIKE for single as per requirement).
+        # Actually requirement says: "If only one is provided, behavior remains the same." -> LIKE.
+        # "filter for any of them (IN clause)" -> Exact match usually for IN. 
+        # But if the user pastes a list, they are specific PVIDs.
+        
+        # Handling:
+        # If pvid list has 1 item -> Use LIKE current behavior (flexible)
+        # If pvid list > 1 item -> Use IN (exact match)
+        
+        valid_pvids = [p for p in pvid if p] # clean empty strings
+        if len(valid_pvids) == 1:
+            where_clauses.append("LOWER(product_variant_id) LIKE LOWER(@pvid_single)")
+            params.append(bigquery.ScalarQueryParameter("pvid_single", "STRING", f"%{valid_pvids[0]}%"))
+        elif len(valid_pvids) > 1:
+            where_clauses.append("product_variant_id IN UNNEST(@pvid_list)")
+            params.append(bigquery.ArrayQueryParameter("pvid_list", "STRING", valid_pvids))
     if created_bucket and created_bucket != "All":
         # Normalize nulls into 'More than 30 Days' bucket
         where_clauses.append("COALESCE(created_date_bucket_label, 'More than 30 Days') = @created_bucket")
@@ -361,7 +379,10 @@ def get_images(
           image1_last_updated_at, image2_last_updated_at, image3_last_updated_at, image4_last_updated_at, image5_last_updated_at,
           image6_last_updated_at, image7_last_updated_at, image8_last_updated_at, image9_last_updated_at, image10_last_updated_at,
           image1_updated_by, image2_updated_by, image3_updated_by, image4_updated_by, image5_updated_by,
-          image6_updated_by, image7_updated_by, image8_updated_by, image9_updated_by, image10_updated_by
+          image6_updated_by, image7_updated_by, image8_updated_by, image9_updated_by, image10_updated_by,
+          image_count, image_3x4_count, transparent_image_exists, transparent_image_link,
+          image1_format, image2_format, image3_format, image4_format, image5_format,
+          image6_format, image7_format, image8_format, image9_format, image10_format
         FROM `{table_id}`
         WHERE {where_sql}
         ORDER BY product_variant_id
@@ -394,6 +415,10 @@ def get_images(
                 "l3_category_name": row.get("l3_category_name"),
                 "packsize": row.get("packsize"),
                 "created_date_bucket_label": row.get("created_date_bucket_label"),
+                "image_count": row.get("image_count"),
+                "image_3x4_count": row.get("image_3x4_count"),
+                "transparent_image_exists": row.get("transparent_image_exists"),
+                "transparent_image_link": row.get("transparent_image_link"),
                 "images": [],
             },
         )
@@ -416,6 +441,7 @@ def get_images(
                 "white_bg": row.get(f"white_bg{idx}"),
                 "last_updated_at": row.get(f"image{idx}_last_updated_at"),
                 "last_updated_by": row.get(f"image{idx}_updated_by"),
+                "image_format": row.get(f"image{idx}_format"),
             }
             item["images"].append(img)
 
@@ -479,6 +505,7 @@ def get_images(
                     updated_at=state.get("updated_at"),
                     last_updated_at=img.get("last_updated_at"),
                     last_updated_by=img.get("last_updated_by"),
+                    image_format=img.get("image_format"),
                 )
             )
 
@@ -504,6 +531,10 @@ def get_images(
                 packsize=raw_item["packsize"],
                 created_date_bucket_label=raw_item["created_date_bucket_label"],
                 pvid_review_status=pvid_review_status,
+                image_count=raw_item["image_count"],
+                image_3x4_count=raw_item["image_3x4_count"],
+                transparent_image_exists=raw_item["transparent_image_exists"],
+                transparent_image_link=raw_item["transparent_image_link"],
                 images=merged_images,
             )
         )
@@ -770,4 +801,3 @@ def verify_reviewer_access(email: str):
 def health():
     return {"status": "ok"}
 app.include_router(router)
-
