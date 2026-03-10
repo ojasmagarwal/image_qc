@@ -1,8 +1,12 @@
 import os
 import json
 import uuid
+import time
+import math
+import random
 import logging
 from datetime import datetime
+from zoneinfo import ZoneInfo
 from typing import Optional, List, Any, Dict
 
 from fastapi import FastAPI, HTTPException, Query, APIRouter
@@ -11,6 +15,7 @@ from pydantic import BaseModel, Field, EmailStr
 from google.cloud import bigquery
 from google.cloud import firestore
 from google.oauth2 import service_account
+from google.api_core import exceptions as gapi_exceptions
 
 # --- Configuration & Setup ---
 
@@ -86,6 +91,7 @@ class ToggleRequest(BaseModel):
     product_variant_id: str
     image_index: int
     actor: EmailStr
+    desired_status: Optional[str] = None  # "REVIEWED" | "NOT_REVIEWED" (idempotent when set)
 
 class ToggleResponse(BaseModel):
     new_status: str
@@ -269,10 +275,13 @@ def get_images(
     l2: Optional[str] = Query(None, alias="subcategory_name"),
     l3: Optional[str] = Query(None, alias="l3_category_name"),
     pvid: Optional[List[str]] = Query(None, alias="product_variant_id"),
-    created_bucket: Optional[List[str]] = Query(None)
+    created_bucket: Optional[List[str]] = Query(None),
+    include_fs_state: bool = Query(True),
+    actor_email: Optional[str] = Query(None),
 ):
     """
     Fetch PVID-level items with nested images[] and filters.
+    For reviewer role: restricts to today's assigned PVIDs unless an explicit pvid search is provided.
     """
     bq = get_bq_client()
     fs = get_fs_client()
@@ -322,27 +331,32 @@ def get_images(
     if l3:
         where_clauses.append("l3_category_name = @l3")
         params.append(bigquery.ScalarQueryParameter("l3", "STRING", l3))
+
+    # --- Reviewer assignment filter ---
+    # Must happen BEFORE the pvid WHERE clause so our override is picked up.
+    # EXCEPTION: if the user already provided explicit pvid params, bypass the filter.
+    if actor_email and fs:
+        actor_role = _resolve_role(fs, actor_email)
+        has_explicit_pvid_search = bool(pvid and any(p for p in pvid if p))
+        if actor_role == "reviewer" and not has_explicit_pvid_search:
+            assigned_pvids = _get_reviewer_assigned_pvids(fs, actor_email)
+            if assigned_pvids is not None:  # None means no assignment doc yet → no filter
+                pvid = assigned_pvids if assigned_pvids else ["__EMPTY_ASSIGNMENT__"]  # empty → zero results
+                logger.info(
+                    "role=reviewer actor=%s assignment_filter_applied=True pvids_in_scope=%d",
+                    actor_email, len(assigned_pvids)
+                )
+
     if pvid:
-        # PVID filter: if list has > 1 item, use IN. If 1 item, use LIKE for partial match (or exact if preferred, but keeping LIKE for single as per requirement).
-        # Actually requirement says: "If only one is provided, behavior remains the same." -> LIKE.
-        # "filter for any of them (IN clause)" -> Exact match usually for IN. 
-        # But if the user pastes a list, they are specific PVIDs.
-        
-        # Handling:
-        # If pvid list has 1 item -> Use LIKE current behavior (flexible)
-        # If pvid list > 1 item -> Use IN (exact match)
-        
-        valid_pvids = [p for p in pvid if p] # clean empty strings
+        # PVID filter: if list has > 1 item, use IN. If 1 item, use LIKE for partial match.
+        # For reviewer assignment injection (always ≥2 PVIDs), uses IN with exact match.
+        valid_pvids = [p for p in pvid if p]  # clean empty strings
         if len(valid_pvids) == 1:
             where_clauses.append("LOWER(product_variant_id) LIKE LOWER(@pvid_single)")
             params.append(bigquery.ScalarQueryParameter("pvid_single", "STRING", f"%{valid_pvids[0]}%"))
         elif len(valid_pvids) > 1:
             where_clauses.append("product_variant_id IN UNNEST(@pvid_list)")
             params.append(bigquery.ArrayQueryParameter("pvid_list", "STRING", valid_pvids))
-    if created_bucket and created_bucket != "All":
-        # Normalize nulls into 'More than 30 Days' bucket
-        where_clauses.append("COALESCE(created_date_bucket_label, 'More than 30 Days') = @created_bucket")
-        params.append(bigquery.ScalarQueryParameter("created_bucket", "STRING", created_bucket))
 
     where_sql = " AND ".join(where_clauses)
 
@@ -400,7 +414,6 @@ def get_images(
 
     # 2. Build PVID-level structure with image slots 1..10 from BQ
     pvid_items: Dict[str, Dict[str, Any]] = {}
-    doc_ids: List[str] = []
 
     for row in bq_rows:
         pvid_val = row["product_variant_id"]
@@ -445,38 +458,41 @@ def get_images(
             }
             item["images"].append(img)
 
-            if fs:
-                doc_ids.append(get_firestore_doc_id(pvid_val, idx))
-
-    # 3. Batch Get from Firestore (if available)
+    # 3. Batch Get from Firestore (Option B + C)
+    # Option B: skip Firestore entirely for viewers (include_fs_state=False)
+    # Option C: one doc per PVID instead of one per image
     fs_map: Dict[str, Dict[str, Any]] = {}
-    if fs and doc_ids:
+    doc_ids: List[str] = list(pvid_items.keys())  # one doc ID per PVID
+    if include_fs_state and fs:
         try:
-            doc_refs = [fs.collection("qc_current_state").document(did) for did in doc_ids]
+            doc_refs = [fs.collection("qc_current_state").document(pvid_id) for pvid_id in doc_ids]
             fs_docs = fs.get_all(doc_refs)
             for doc in fs_docs:
                 if doc.exists:
                     fs_map[doc.id] = doc.to_dict()
+            logger.info(f"FS merge mode=OptionC pvid_docs={len(doc_ids)} include_fs_state={include_fs_state}")
         except Exception as e:
             logger.error(f"Firestore batch get failed: {e}")
             # Degrade gracefully -> treat all as defaults
+    else:
+        logger.info(f"FS merge mode=OptionC pvid_docs={len(doc_ids)} include_fs_state={include_fs_state}")
 
     # 4. Merge Firestore state and apply status filter at PVID level
     result_items: List[PvidItem] = []
     for pvid_val, raw_item in pvid_items.items():
         merged_images: List[ImageItem] = []
-        all_images_reviewed = True if raw_item["images"] else False
+
+        # Option C: one doc per PVID; images keyed by str(image_index)
+        pvid_state = fs_map.get(pvid_val, {}) or {}
+        images_state: Dict[str, Any] = pvid_state.get("images") or {}
 
         for img in raw_item["images"]:
-            did = get_firestore_doc_id(pvid_val, img["image_index"])
-            state = fs_map.get(did, {})
+            idx_key = str(img["image_index"])
+            img_state = images_state.get(idx_key, {}) or {}
 
-            review_status = state.get("review_status", "NOT_REVIEWED")
-            
-            if review_status != "REVIEWED":
-                all_images_reviewed = False
+            review_status = img_state.get("review_status", "NOT_REVIEWED")
 
-            issues_state = state.get("issues") or {}
+            issues_state = img_state.get("issues") or {}
             issues = ImageIssues(
                 image_blur=bool(issues_state.get("image_blur", False)),
                 cropped_image=bool(issues_state.get("cropped_image", False)),
@@ -500,18 +516,16 @@ def get_images(
                     white_bg=img.get("white_bg"),
                     review_status=review_status,
                     issues=issues,
-                    remark=state.get("remark"),
-                    updated_by=state.get("updated_by"),
-                    updated_at=state.get("updated_at"),
+                    remark=img_state.get("remark"),
+                    updated_by=img_state.get("updated_by"),
+                    updated_at=img_state.get("updated_at"),
                     last_updated_at=img.get("last_updated_at"),
                     last_updated_by=img.get("last_updated_by"),
                     image_format=img.get("image_format"),
                 )
             )
 
-        # Compute PVID status
-        # If any image is reviewed, does that mean PVID is partially reviewed? 
-        # Current logic: ALL images must be REVIEWED for PVID to be REVIEWED.
+        # Compute PVID status: ALL images must be REVIEWED for PVID to be REVIEWED.
         all_reviewed_flag = all(img.review_status == "REVIEWED" for img in merged_images) if merged_images else False
         pvid_review_status = "REVIEWED" if all_reviewed_flag else "NOT_REVIEWED"
 
@@ -559,37 +573,56 @@ def toggle_status(req: ToggleRequest):
     if not fs:
         raise HTTPException(status_code=503, detail="Firestore not configured. System is Read-Only.")
 
-    doc_id = get_firestore_doc_id(req.product_variant_id, req.image_index)
-    doc_ref = fs.collection('qc_current_state').document(doc_id)
-    
+    # Validate desired_status if provided
+    if req.desired_status is not None and req.desired_status not in ("REVIEWED", "NOT_REVIEWED"):
+        raise HTTPException(status_code=400, detail="desired_status must be 'REVIEWED' or 'NOT_REVIEWED'")
+
+    # Option C: one doc per PVID, images map keyed by str(image_index)
+    doc_ref = fs.collection('qc_current_state').document(req.product_variant_id)
+    idx_key = str(req.image_index)
+
     event_id = str(uuid.uuid4())
     event_ts = datetime.utcnow()
-    
+
     @firestore.transactional
     def update_in_transaction(transaction, doc_ref):
         snapshot = doc_ref.get(transaction=transaction)
         current_status = "NOT_REVIEWED"
-        
+
         if snapshot.exists:
-            data = snapshot.to_dict()
-            current_status = data.get('review_status', 'NOT_REVIEWED')
-            
-        new_status = "REVIEWED" if current_status == "NOT_REVIEWED" else "NOT_REVIEWED"
-        
-        # Write to Current State
+            data = snapshot.to_dict() or {}
+            img_state = (data.get("images") or {}).get(idx_key) or {}
+            current_status = img_state.get('review_status', 'NOT_REVIEWED')
+
+        # Idempotent: use explicit desired_status if provided, else toggle
+        if req.desired_status is not None:
+            new_status = req.desired_status
+        else:
+            new_status = "REVIEWED" if current_status == "NOT_REVIEWED" else "NOT_REVIEWED"
+
+        # Short-circuit: no write needed if already in desired state
+        if new_status == current_status:
+            return current_status, False  # (status, changed)
+
+        # IMPORTANT: Use nested dict — NOT dot-path strings as keys.
+        # The Python Firestore SDK does NOT expand "images.1.review_status" into
+        # nested maps inside transaction.set(). It stores it as a literal field name.
+        # The correct way to write nested maps is via a proper dict structure.
         transaction.set(
             doc_ref,
             {
-                'product_variant_id': req.product_variant_id,
-                'image_index': req.image_index,
-                'review_status': new_status,
-                'updated_by': req.actor,
-                'updated_at': event_ts,
+                "images": {
+                    idx_key: {
+                        "review_status": new_status,
+                        "updated_by": req.actor,
+                        "updated_at": event_ts,
+                    }
+                }
             },
             merge=True,
         )
-        
-        # Write to Event Log
+
+        # Write event log only when a change occurred
         log_ref = fs.collection('qc_event_log').document(event_id)
         transaction.set(log_ref, {
             'event_id': event_id,
@@ -601,12 +634,54 @@ def toggle_status(req: ToggleRequest):
             'new_status': new_status,
             'actor': req.actor
         })
-        
-        return new_status
 
+        return new_status, True  # (status, changed)
+
+    # Retry with exponential backoff + jitter for write contention
+    base = 0.1
+    max_attempts = 5
+    new_status = None
     transaction = fs.transaction()
-    new_status = update_in_transaction(transaction, doc_ref)
-    
+    for attempt in range(max_attempts):
+        try:
+            new_status, changed = update_in_transaction(transaction, doc_ref)
+            if changed:
+                logger.info(
+                    "QC write success: pvid=%s idx=%s event_id=%s new_status=%s",
+                    req.product_variant_id, req.image_index, event_id, new_status
+                )
+            else:
+                logger.info(
+                    "QC toggle no-op: pvid=%s idx=%s already=%s",
+                    req.product_variant_id, req.image_index, new_status
+                )
+            break
+        except gapi_exceptions.Aborted:
+            if attempt == max_attempts - 1:
+                raise HTTPException(status_code=409, detail="Write contention. Please retry.")
+            sleep_s = base * (2 ** attempt) + random.uniform(0, base)
+            time.sleep(sleep_s)
+
+    # Post-write diagnostic read
+    try:
+        _vdoc = doc_ref.get()
+        _vdata = _vdoc.to_dict() or {}
+        _images = _vdata.get("images") or {}
+        stored_status = (_images.get(idx_key) or {}).get("review_status")
+        logger.info(
+            "Post-write verify: project=%s pvid=%s idx=%s exists=%s doc_id=%s "
+            "images_keys=%s stored_status=%s desired=%s",
+            getattr(fs, 'project', 'unknown'),
+            req.product_variant_id, req.image_index,
+            _vdoc.exists, _vdoc.id,
+            len(_images), stored_status, req.desired_status
+        )
+        if stored_status is None:
+            # Full dict dump to understand actual structure
+            logger.warning("Post-write verify FAILED — full doc: %s", str(_vdata)[:2000])
+    except Exception as _e:
+        logger.warning("Post-write verify read failed: %s", _e)
+
     return JSONResponse(
         content={"new_status": new_status, "event_id": event_id},
         headers={"Cache-Control": "no-store"}
@@ -624,8 +699,9 @@ def toggle_issue(req: IssueToggleRequest):
     if req.issue_key not in ISSUE_KEYS:
         raise HTTPException(status_code=400, detail=f"Invalid issue_key '{req.issue_key}'")
 
-    doc_id = get_firestore_doc_id(req.product_variant_id, req.image_index)
-    doc_ref = fs.collection("qc_current_state").document(doc_id)
+    # Option C: one doc per PVID, images map keyed by str(image_index)
+    doc_ref = fs.collection("qc_current_state").document(req.product_variant_id)
+    idx_key = str(req.image_index)
 
     event_id = str(uuid.uuid4())
     event_ts = datetime.utcnow()
@@ -633,34 +709,32 @@ def toggle_issue(req: IssueToggleRequest):
     @firestore.transactional
     def update_in_transaction(transaction, doc_ref):
         snapshot = doc_ref.get(transaction=transaction)
-        current_status = "NOT_REVIEWED"
         current_issues = {}
 
         if snapshot.exists:
-            data = snapshot.to_dict()
-            current_status = data.get("review_status", "NOT_REVIEWED")
-            current_issues = data.get("issues") or {}
+            data = snapshot.to_dict() or {}
+            img_state = (data.get("images") or {}).get(idx_key) or {}
+            current_issues = img_state.get("issues") or {}
 
         old_value = bool(current_issues.get(req.issue_key, False))
         new_value = bool(req.value)
 
-        current_issues[req.issue_key] = new_value
-
-        # Write to Current State
+        # Use proper nested dict — NOT dot-path string keys
         transaction.set(
             doc_ref,
             {
-                "product_variant_id": req.product_variant_id,
-                "image_index": req.image_index,
-                "review_status": current_status,
-                "issues": current_issues,
-                "updated_by": req.actor,
-                "updated_at": event_ts,
+                "images": {
+                    idx_key: {
+                        "issues": {req.issue_key: new_value},
+                        "updated_by": req.actor,
+                        "updated_at": event_ts,
+                    }
+                }
             },
             merge=True,
         )
 
-        # Write to Event Log
+        # Write to Event Log inside same transaction
         log_ref = fs.collection("qc_event_log").document(event_id)
         transaction.set(
             log_ref,
@@ -673,13 +747,27 @@ def toggle_issue(req: IssueToggleRequest):
                 "issue_key": req.issue_key,
                 "old_issue_value": old_value,
                 "new_issue_value": new_value,
-                "issues_snapshot": current_issues,
                 "actor": req.actor,
             },
         )
 
+    # Retry with exponential backoff + jitter for write contention
+    base = 0.1
+    max_attempts = 5
     transaction = fs.transaction()
-    update_in_transaction(transaction, doc_ref)
+    for attempt in range(max_attempts):
+        try:
+            update_in_transaction(transaction, doc_ref)
+            logger.info(
+                "QC issue write success: pvid=%s idx=%s issue=%s event_id=%s",
+                req.product_variant_id, req.image_index, req.issue_key, event_id
+            )
+            break
+        except gapi_exceptions.Aborted:
+            if attempt == max_attempts - 1:
+                raise HTTPException(status_code=409, detail="Write contention. Please retry.")
+            sleep_s = base * (2 ** attempt) + random.uniform(0, base)
+            time.sleep(sleep_s)
 
     return JSONResponse(
         content={"status": "ok", "event_id": event_id},
@@ -695,8 +783,9 @@ def toggle_remark(req: RemarkRequest):
     if not fs:
         raise HTTPException(status_code=503, detail="Firestore not configured. System is Read-Only.")
 
-    doc_id = get_firestore_doc_id(req.product_variant_id, req.image_index)
-    doc_ref = fs.collection("qc_current_state").document(doc_id)
+    # Option C: one doc per PVID
+    doc_ref = fs.collection("qc_current_state").document(req.product_variant_id)
+    idx_key = str(req.image_index)
 
     event_id = str(uuid.uuid4())
     event_ts = datetime.utcnow()
@@ -704,27 +793,27 @@ def toggle_remark(req: RemarkRequest):
     @firestore.transactional
     def update_in_transaction(transaction, doc_ref):
         snapshot = doc_ref.get(transaction=transaction)
-        current_status = "NOT_REVIEWED"
         old_remark = None
 
         if snapshot.exists:
             data = snapshot.to_dict()
-            current_status = data.get("review_status", "NOT_REVIEWED")
-            old_remark = data.get("remark")
+            img_state = (data.get("images") or {}).get(idx_key, {})
+            old_remark = img_state.get("remark")
 
         if old_remark == req.remark:
-             return # No change
+            return  # No change
 
-        # Write to Current State
+        # Use nested dict for merge (dot-path keys are literal in Python SDK)
         transaction.set(
             doc_ref,
             {
-                "product_variant_id": req.product_variant_id,
-                "image_index": req.image_index,
-                "review_status": current_status,
-                "remark": req.remark,
-                "updated_by": req.actor,
-                "updated_at": event_ts,
+                "images": {
+                    idx_key: {
+                        "remark": req.remark,
+                        "updated_by": req.actor,
+                        "updated_at": event_ts,
+                    }
+                }
             },
             merge=True,
         )
@@ -757,27 +846,60 @@ def toggle_remark(req: RemarkRequest):
 def get_role(email: str):
     fs = get_fs_client()
     if not fs:
-        # If no DB, everyone is a viewer (safest)
         return RoleResponse(email=email, role="viewer")
-        
+    role = _resolve_role(fs, email)
+    return RoleResponse(email=email, role=role, exists=(role != "viewer"))
+
+
+def _resolve_role(fs, email: str) -> str:
+    """
+    Resolve role for an email. Checks qc_users first (source of truth for assignments),
+    then falls back to Reviewers collection. Returns 'admin' | 'reviewer' | 'viewer'.
+    """
     try:
-        # Check 'Reviewers' collection (email as document ID)
-        doc = fs.collection('Reviewers').document(email).get()
-        role = "viewer"
-        exists = False
-        
+        # 1. Check qc_users (preferred)
+        doc = fs.collection('qc_users').document(email).get()
         if doc.exists:
-            exists = True
-            data = doc.to_dict()
-            if data.get("role") == "reviewer":
-                role = "reviewer"
-            elif data.get("role") == "admin":
-                 role = "admin"
-                
-        return RoleResponse(email=email, role=role, exists=exists)
+            data = doc.to_dict() or {}
+            r = data.get("role", "viewer")
+            active = data.get("active", True)
+            if not active:
+                return "viewer"  # deactivated users become viewers
+            if r in ("admin", "reviewer"):
+                return r
     except Exception as e:
-        logger.error(f"Error fetching role: {e}")
-        return RoleResponse(email=email, role="viewer", exists=False)
+        logger.warning("qc_users role lookup failed for %s: %s", email, e)
+
+    try:
+        # 2. Fallback: Reviewers collection (legacy)
+        doc = fs.collection('Reviewers').document(email).get()
+        if doc.exists:
+            data = doc.to_dict() or {}
+            r = data.get("role", "viewer")
+            if r in ("admin", "reviewer"):
+                return r
+    except Exception as e:
+        logger.warning("Reviewers fallback role lookup failed for %s: %s", email, e)
+
+    return "viewer"
+
+
+def _get_reviewer_assigned_pvids(fs, email: str) -> Optional[List[str]]:
+    """
+    Returns today's assigned PVID list for a reviewer, or None if no assignment doc exists.
+    """
+    try:
+        today = _today_ist()
+        doc = fs.collection("qc_assignments").document(today).get()
+        if not doc.exists:
+            return None
+        data = doc.to_dict() or {}
+        assignments = data.get("assignments") or {}
+        return assignments.get(email, [])
+    except Exception as e:
+        logger.warning("Could not load assignments for reviewer %s: %s", email, e)
+        return None
+
 
 def verify_reviewer_access(email: str):
     """
@@ -800,4 +922,390 @@ def verify_reviewer_access(email: str):
 @router.get("/health")
 def health():
     return {"status": "ok"}
+
+
+# ============================================================
+# PVID ASSIGNMENT SYSTEM
+# ============================================================
+
+# --- Assignment Models ---
+
+class ReviewerSummary(BaseModel):
+    email: str
+    assigned_total: int
+    reviewed_count: int
+    pending_count: int
+
+class AssignmentSummaryResponse(BaseModel):
+    date: str
+    reviewers: List[ReviewerSummary]
+
+class PvidAssignmentDetail(BaseModel):
+    product_variant_id: str
+    pvid_review_status: str
+    reviewed_images: int
+    total_images: int
+    last_updated_at: Optional[datetime] = None
+    last_updated_by: Optional[str] = None
+
+class AssignmentDetailsResponse(BaseModel):
+    reviewer_email: str
+    pvids: List[PvidAssignmentDetail]
+
+class AssignmentMapResponse(BaseModel):
+    date: str
+    assignments: Dict[str, List[str]]
+
+class RegenerateRequest(BaseModel):
+    force: bool = False
+
+
+# --- Assignment Helper ---
+
+IST = ZoneInfo("Asia/Kolkata")
+
+MAX_PER_REVIEWER = 100
+
+
+def _today_ist() -> str:
+    """Return today's date in IST as YYYY-MM-DD."""
+    return datetime.now(IST).strftime("%Y-%m-%d")
+
+
+def _load_reviewers(fs) -> List[str]:
+    """
+    Load active reviewers from qc_users where role == 'reviewer' and active == True.
+    Falls back to Reviewers collection if qc_users is empty.
+    """
+    emails: List[str] = []
+    try:
+        docs = fs.collection("qc_users").where("role", "==", "reviewer").where("active", "==", True).stream()
+        emails = [doc.id for doc in docs]
+    except Exception as e:
+        logger.warning("qc_users query failed, trying Reviewers fallback: %s", e)
+
+    if not emails:
+        # Fallback: read Reviewers collection
+        try:
+            docs = fs.collection("Reviewers").stream()
+            for doc in docs:
+                data = doc.to_dict() or {}
+                if data.get("role") == "reviewer" and data.get("active", True):
+                    emails.append(doc.id)
+        except Exception as e:
+            logger.error("Reviewers fallback also failed: %s", e)
+
+    return sorted(emails)  # deterministic order
+
+
+def _fetch_not_reviewed_pvids(bq, fs) -> List[Dict[str, Any]]:
+    """
+    Fetch all NOT_REVIEWED PVIDs from BigQuery, then filter by Firestore state.
+    Returns list of dicts with keys: product_variant_id, created_date_bucket_label
+    sorted by (created_date_bucket_label, product_variant_id).
+    """
+    table_id = get_bq_table_id("qc_image_source")
+    query = f"""
+        SELECT
+            product_variant_id,
+            COALESCE(created_date_bucket_label, 'More than 30 Days') AS created_date_bucket_label
+        FROM `{table_id}`
+        GROUP BY 1, 2
+        ORDER BY created_date_bucket_label, product_variant_id
+    """
+    try:
+        rows = [dict(r) for r in bq.query(query).result()]
+    except Exception as e:
+        logger.error("BQ fetch for assignment failed: %s", e)
+        raise HTTPException(status_code=500, detail=f"BQ query failed: {e}")
+
+    if not rows:
+        return []
+
+    all_pvids = [r["product_variant_id"] for r in rows]
+
+    # Batch-read Firestore status (qc_current_state keyed by pvid)
+    reviewed_pvids: set = set()
+    if fs:
+        BATCH = 500  # Firestore get_all supports up to 10 MB / ~500 docs safely
+        for i in range(0, len(all_pvids), BATCH):
+            batch_pvids = all_pvids[i:i + BATCH]
+            refs = [fs.collection("qc_current_state").document(p) for p in batch_pvids]
+            try:
+                docs = fs.get_all(refs)
+                for doc in docs:
+                    if not doc.exists:
+                        continue
+                    data = doc.to_dict() or {}
+                    images_map = data.get("images") or {}
+                    # PVID is REVIEWED only if ALL its images have review_status == REVIEWED
+                    # and it has at least one image
+                    if not images_map:
+                        continue
+                    all_img_reviewed = all(
+                        (img_data or {}).get("review_status") == "REVIEWED"
+                        for img_data in images_map.values()
+                        if isinstance(img_data, dict)
+                    )
+                    if all_img_reviewed:
+                        reviewed_pvids.add(doc.id)
+            except Exception as e:
+                logger.warning("Firestore batch read failed in assignment fetch: %s", e)
+
+    # Keep only NOT_REVIEWED PVIDs
+    not_reviewed = [r for r in rows if r["product_variant_id"] not in reviewed_pvids]
+    return not_reviewed
+
+
+def ensure_today_assignments(fs, bq, force: bool = False) -> Dict[str, Any]:
+    """
+    Idempotent: returns existing assignments for today, or creates them.
+    If force=True, delete existing and regenerate.
+    """
+    today = _today_ist()
+    assign_ref = fs.collection("qc_assignments").document(today)
+
+    if not force:
+        existing = assign_ref.get()
+        if existing.exists:
+            logger.info("Returning existing assignments for %s", today)
+            return existing.to_dict()
+
+    # Load reviewers
+    reviewers = _load_reviewers(fs)
+    if not reviewers:
+        raise HTTPException(status_code=400, detail="No active reviewers found in qc_users or Reviewers collection.")
+
+    reviewer_count = len(reviewers)
+
+    # Fetch NOT_REVIEWED PVIDs sorted deterministically
+    not_reviewed_rows = _fetch_not_reviewed_pvids(bq, fs)
+    total_available = len(not_reviewed_rows)
+
+    # Compute per-reviewer slice size
+    if total_available == 0:
+        assign_per_reviewer = 0
+    elif total_available < reviewer_count * MAX_PER_REVIEWER:
+        assign_per_reviewer = math.floor(total_available / reviewer_count)
+    else:
+        assign_per_reviewer = MAX_PER_REVIEWER
+
+    # Slice sequentially — no duplicates guaranteed
+    assignments: Dict[str, List[str]] = {}
+    pvid_list = [r["product_variant_id"] for r in not_reviewed_rows]
+    for i, email in enumerate(reviewers):
+        start = i * assign_per_reviewer
+        end = start + assign_per_reviewer
+        assignments[email] = pvid_list[start:end]
+
+    total_assigned = sum(len(v) for v in assignments.values())
+
+    doc_data = {
+        "date": today,
+        "created_at": datetime.utcnow(),
+        "created_by": "system",
+        "reviewers": reviewers,
+        "assignments": assignments,
+    }
+
+    assign_ref.set(doc_data)
+
+    logger.info(
+        "ASSIGNMENT_CREATED date=%s reviewer_count=%d pvids_assigned=%d assign_per_reviewer=%d",
+        today, reviewer_count, total_assigned, assign_per_reviewer
+    )
+
+    return doc_data
+
+
+def _compute_pvid_status_from_fs(fs, pvids: List[str]) -> Dict[str, Dict[str, Any]]:
+    """
+    Batch-read qc_current_state for given pvid list.
+    Returns dict keyed by pvid with keys: pvid_review_status, reviewed_images,
+    total_images, last_updated_at, last_updated_by.
+    """
+    result: Dict[str, Dict[str, Any]] = {}
+    if not pvids or not fs:
+        return result
+
+    BATCH = 500
+    for i in range(0, len(pvids), BATCH):
+        batch = pvids[i:i + BATCH]
+        refs = [fs.collection("qc_current_state").document(p) for p in batch]
+        try:
+            docs = fs.get_all(refs)
+            for doc in docs:
+                pvid = doc.id
+                if not doc.exists:
+                    result[pvid] = {
+                        "pvid_review_status": "NOT_REVIEWED",
+                        "reviewed_images": 0,
+                        "total_images": 0,
+                        "last_updated_at": None,
+                        "last_updated_by": None,
+                    }
+                    continue
+                data = doc.to_dict() or {}
+                images_map = data.get("images") or {}
+                total = 0
+                reviewed = 0
+                last_ts = None
+                last_by = None
+                for img_data in images_map.values():
+                    if not isinstance(img_data, dict):
+                        continue
+                    total += 1
+                    if img_data.get("review_status") == "REVIEWED":
+                        reviewed += 1
+                    ts = img_data.get("updated_at")
+                    if ts and (last_ts is None or ts > last_ts):
+                        last_ts = ts
+                        last_by = img_data.get("updated_by")
+                result[pvid] = {
+                    "pvid_review_status": "REVIEWED" if (total > 0 and reviewed == total) else "NOT_REVIEWED",
+                    "reviewed_images": reviewed,
+                    "total_images": total,
+                    "last_updated_at": last_ts,
+                    "last_updated_by": last_by,
+                }
+        except Exception as e:
+            logger.warning("Firestore batch read failed in status compute: %s", e)
+
+    # Ensure every requested pvid has an entry
+    for p in pvids:
+        if p not in result:
+            result[p] = {
+                "pvid_review_status": "NOT_REVIEWED",
+                "reviewed_images": 0,
+                "total_images": 0,
+                "last_updated_at": None,
+                "last_updated_by": None,
+            }
+    return result
+
+
+# --- Admin Endpoints ---
+
+@router.get("/admin/assignments/today", response_model=AssignmentSummaryResponse)
+def get_assignments_today():
+    """
+    Returns today's assignment summary with per-reviewer reviewed/pending counts.
+    Creates assignments if they don't exist yet.
+    """
+    fs = get_fs_client()
+    if not fs:
+        raise HTTPException(status_code=503, detail="Firestore not configured.")
+    bq = get_bq_client()
+
+    doc_data = ensure_today_assignments(fs, bq)
+    assignments: Dict[str, List[str]] = doc_data.get("assignments", {})
+
+    # Collect all PVIDs in one batch read
+    all_pvids = list({p for pvids in assignments.values() for p in pvids})
+    status_map = _compute_pvid_status_from_fs(fs, all_pvids)
+
+    reviewer_summaries: List[ReviewerSummary] = []
+    for email in doc_data.get("reviewers", []):
+        pvids = assignments.get(email, [])
+        reviewed = sum(1 for p in pvids if status_map.get(p, {}).get("pvid_review_status") == "REVIEWED")
+        reviewer_summaries.append(ReviewerSummary(
+            email=email,
+            assigned_total=len(pvids),
+            reviewed_count=reviewed,
+            pending_count=len(pvids) - reviewed,
+        ))
+
+    logger.info("assignment summary generated for date=%s reviewers=%d", doc_data["date"], len(reviewer_summaries))
+    return AssignmentSummaryResponse(date=doc_data["date"], reviewers=reviewer_summaries)
+
+
+@router.get("/admin/assignments/details", response_model=AssignmentDetailsResponse)
+def get_assignment_details(reviewer_email: Optional[str] = Query(None)):
+    """
+    Returns per-PVID detail for one reviewer (or all if reviewer_email omitted).
+    """
+    fs = get_fs_client()
+    if not fs:
+        raise HTTPException(status_code=503, detail="Firestore not configured.")
+    bq = get_bq_client()
+
+    doc_data = ensure_today_assignments(fs, bq)
+    assignments: Dict[str, List[str]] = doc_data.get("assignments", {})
+
+    if reviewer_email:
+        if reviewer_email not in assignments:
+            raise HTTPException(status_code=404, detail=f"Reviewer '{reviewer_email}' has no assignments today.")
+        pvids = assignments[reviewer_email]
+        label = reviewer_email
+    else:
+        # All reviewers merged (admin overview)
+        pvids = [p for pvlist in assignments.values() for p in pvlist]
+        label = "all"
+
+    status_map = _compute_pvid_status_from_fs(fs, pvids)
+
+    details = [
+        PvidAssignmentDetail(
+            product_variant_id=pvid,
+            pvid_review_status=status_map[pvid]["pvid_review_status"],
+            reviewed_images=status_map[pvid]["reviewed_images"],
+            total_images=status_map[pvid]["total_images"],
+            last_updated_at=status_map[pvid]["last_updated_at"],
+            last_updated_by=status_map[pvid]["last_updated_by"],
+        )
+        for pvid in pvids
+    ]
+
+    logger.info("assignment details generated reviewer_email=%s pvids=%d", label, len(details))
+    return AssignmentDetailsResponse(reviewer_email=label, pvids=details)
+
+
+@router.get("/admin/assignments/map", response_model=AssignmentMapResponse)
+def get_assignment_map():
+    """
+    Returns the raw assignments map for today.
+    """
+    fs = get_fs_client()
+    if not fs:
+        raise HTTPException(status_code=503, detail="Firestore not configured.")
+    bq = get_bq_client()
+
+    doc_data = ensure_today_assignments(fs, bq)
+    return AssignmentMapResponse(
+        date=doc_data["date"],
+        assignments=doc_data.get("assignments", {}),
+    )
+
+
+@router.post("/admin/assignments/regenerate")
+def regenerate_assignments(req: RegenerateRequest):
+    """
+    Delete and regenerate today's assignments. Requires force=True.
+    """
+    if not req.force:
+        raise HTTPException(status_code=400, detail="Set force=true to regenerate assignments.")
+
+    fs = get_fs_client()
+    if not fs:
+        raise HTTPException(status_code=503, detail="Firestore not configured.")
+    bq = get_bq_client()
+
+    today = _today_ist()
+    # Delete existing doc first
+    try:
+        fs.collection("qc_assignments").document(today).delete()
+        logger.info("Deleted existing assignment doc for %s", today)
+    except Exception as e:
+        logger.warning("Could not delete existing assignment doc: %s", e)
+
+    doc_data = ensure_today_assignments(fs, bq, force=True)
+    total = sum(len(v) for v in doc_data.get("assignments", {}).values())
+    return {
+        "status": "regenerated",
+        "date": today,
+        "reviewers": doc_data.get("reviewers", []),
+        "total_pvids_assigned": total,
+    }
+
+
 app.include_router(router)

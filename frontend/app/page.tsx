@@ -3,7 +3,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { useSession, signIn, signOut, SessionProvider } from "next-auth/react";
 import useSWR from 'swr';
-import { Loader2, X, ChevronLeft, ChevronRight, LogOut, AlertCircle, Check, Search, Save } from 'lucide-react';
+import { Loader2, X, ChevronLeft, ChevronRight, LogOut, AlertCircle, Check, Search, Save, BarChart3 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { API_BASE, fetcher } from '@/lib/api';
 import { MultiSelectDropdown, SearchableBrandDropdown } from '@/components/Filters';
@@ -155,7 +155,7 @@ type PvidItem = {
     image_3x4_count: number | null;
     transparent_image_exists: boolean | null;
     transparent_image_link: string | null;
-    packsize: string | null; 
+    packsize: string | null;
     images: ImageItem[];
 };
 
@@ -176,22 +176,30 @@ type FilterOptions = {
 const useAuth = () => {
     const { data: session, status } = useSession();
     const [role, setRole] = useState<string>('viewer');
+    const [roleLoading, setRoleLoading] = useState(true);
     const email = session?.user?.email || null;
     const loading = status === "loading";
 
     useEffect(() => {
+        if (status === "loading") return; // wait for session to resolve
+
         if (email) {
             fetch(`${API_BASE}/me/role?email=${email}`)
                 .then(r => r.json())
-                .then(d => setRole(d.role))
-                .catch(() => setRole('viewer'));
+                .then(d => { setRole(d.role); setRoleLoading(false); })
+                .catch(() => { setRole('viewer'); setRoleLoading(false); });
+        } else {
+            // No session — role is definitively viewer
+            setRole('viewer');
+            setRoleLoading(false);
         }
-    }, [email]);
+    }, [email, status]);
 
     return {
         email,
         role,
         loading,
+        roleLoading,
         login: () => signIn('google'),
         logout: () => signOut(),
         canWrite: ['reviewer', 'admin'].includes(role)
@@ -597,7 +605,7 @@ export default function Page() {
 }
 
 function Dashboard() {
-    const { email, role, loading: authLoading, login, logout, canWrite } = useAuth();
+    const { email, role, loading: authLoading, roleLoading, login, logout, canWrite } = useAuth();
 
     // Page specific state
     const [page, setPage] = useState(1);
@@ -631,7 +639,14 @@ function Dashboard() {
     const [transparentModalUrl, setTransparentModalUrl] = useState<string | null>(null);
 
     // Fetch Filter Options
-    const { data: filterOptions } = useSWR<FilterOptions>(`${API_BASE}/filters`, fetcher);
+    const { data: filterOptions } = useSWR<FilterOptions>(
+        `${API_BASE}/filters`,
+        fetcher,
+        {
+            revalidateOnFocus: false,
+            dedupingInterval: 60_000
+        }
+    );
 
     // Construct Query Params
     const buildQuery = () => {
@@ -660,16 +675,26 @@ function Dashboard() {
             }
         }
 
+        // All roles read Firestore state so viewers see live QC status
+        p.append('include_fs_state', 'true');
+
+        // Pass actor so backend can apply reviewer PVID filter
+        if (email) p.append('actor_email', email);
+
         return p.toString();
     };
 
+    // Gate images fetch: canWrite is only stable once roleLoading=false
+    const shouldFetchImages = !!email && !authLoading && !roleLoading;
+
     const { data: imagesData, error, isLoading, mutate } = useSWR<ImagesResponse>(
-        email ? `${API_BASE}/images?${buildQuery()}` : null,
+        shouldFetchImages ? `${API_BASE}/images?${buildQuery()}` : null,
         fetcher,
         {
-            refreshInterval: 5000,
-            dedupingInterval: 0,
-            revalidateOnFocus: true,
+            refreshInterval: canWrite ? 10000 : 30000,  // reviewer=10s, viewer=30s (Firestore quota)
+            dedupingInterval: 3000,
+            revalidateOnFocus: false,
+            revalidateOnReconnect: false,
             keepPreviousData: true
         }
     );
@@ -684,20 +709,38 @@ function Dashboard() {
         setPage(1);
     };
 
+    // In-flight lock: prevents double-submit on same image within 800ms
+    const toggleInFlight = useRef<Set<string>>(new Set());
+
     const handleToggleStatus = async (pvid: string, imageIndex: number) => {
         if (!canWrite || !email) return;
 
+        const lockKey = `${pvid}__${imageIndex}`;
+        if (toggleInFlight.current.has(lockKey)) return;  // already in-flight
+        toggleInFlight.current.add(lockKey);
+        setTimeout(() => toggleInFlight.current.delete(lockKey), 800);
+
+        // Compute desired_status from current state BEFORE optimistic update
+        let desiredStatus: 'REVIEWED' | 'NOT_REVIEWED' = 'REVIEWED';
+        const currentData = imagesData;
+        if (currentData) {
+            const pvidItem = currentData.items.find(item => item.product_variant_id === pvid);
+            const img = pvidItem?.images.find(img => img.image_index === imageIndex);
+            if (img) {
+                desiredStatus = img.review_status === 'REVIEWED' ? 'NOT_REVIEWED' : 'REVIEWED';
+            }
+        }
+
         // Optimistic Update
-        await mutate(async (currentData) => {
-            if (!currentData) return undefined;
-            // Deep copy to satisfy SWR immutability
-            const newData = JSON.parse(JSON.stringify(currentData));
+        await mutate(async (current) => {
+            if (!current) return undefined;
+            const newData = JSON.parse(JSON.stringify(current));
 
             const pvidItem = newData.items.find((item: PvidItem) => item.product_variant_id === pvid);
             if (pvidItem) {
                 const img = pvidItem.images.find((img: ImageItem) => img.image_index === imageIndex);
                 if (img) {
-                    img.review_status = img.review_status === 'REVIEWED' ? 'NOT_REVIEWED' : 'REVIEWED';
+                    img.review_status = desiredStatus;
 
                     // Re-calc PVID status
                     const allReviewed = pvidItem.images.every((i: ImageItem) => i.review_status === 'REVIEWED') && pvidItem.images.length > 0;
@@ -714,18 +757,20 @@ function Dashboard() {
                 body: JSON.stringify({
                     product_variant_id: pvid,
                     image_index: imageIndex,
-                    actor: email
+                    actor: email,
+                    desired_status: desiredStatus,  // idempotent write
                 })
             });
 
             if (!res.ok) throw new Error('Failed');
-            // Success: Keep optimistic state. Do NOT refetch.
+            // Success: keep optimistic state, no refetch needed
         } catch (e) {
-            // Failure: Revalidate to rollback
+            // Failure: revalidate to rollback optimistic update
             mutate();
             alert("Failed to toggle status");
         }
     };
+
 
     const handleToggleIssue = async (pvid: string, imageIndex: number, issueKey: string, value: boolean) => {
         if (!canWrite || !email) return;
@@ -812,6 +857,16 @@ function Dashboard() {
                     <h1 className="text-lg font-semibold text-gray-700">Image QC</h1>
                 </div>
                 <div className="flex items-center gap-4">
+                    {/* Admin-only: Assignment Dashboard link */}
+                    {role === 'admin' && (
+                        <a
+                            href="/admin"
+                            className="flex items-center gap-1.5 text-sm text-violet-600 hover:text-violet-800 font-medium px-3 py-1.5 rounded-lg hover:bg-violet-50 transition-colors border border-violet-200"
+                        >
+                            <BarChart3 size={15} />
+                            Assignments
+                        </a>
+                    )}
                     <div className="text-sm text-right">
                         <div className="font-medium text-gray-900">{email}</div>
                         <div className={cn(
