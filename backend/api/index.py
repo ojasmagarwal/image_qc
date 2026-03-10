@@ -202,15 +202,8 @@ def get_firestore_doc_id(pvid: str, image_index: int) -> str:
     return f"{pvid}__{image_index}"
 
 
-ISSUE_KEYS = [
-    "image_blur",
-    "cropped_image",
-    "mrp_present_in_image",
-    "image_quality",
-    "aspect_ratio",
-]
-
 # --- Endpoints ---
+
 
 @router.get("/filters", response_model=FilterResponse)
 def get_filters():

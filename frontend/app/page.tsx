@@ -206,6 +206,39 @@ const useAuth = () => {
     };
 };
 
+// --- Skeleton-aware image ---
+function LazyImage({ src, alt, className }: { src: string; alt: string; className?: string }) {
+    const [loaded, setLoaded] = useState(false);
+    const [error, setError] = useState(false);
+
+    // Reset state whenever the src changes (e.g., navigating between images)
+    useEffect(() => { setLoaded(false); setError(false); }, [src]);
+
+    return (
+        <div className={`relative ${className ?? ''}`} style={{ width: '100%', height: '100%' }}>
+            {!loaded && !error && (
+                <div className="absolute inset-0 flex items-center justify-center bg-gray-100 animate-pulse rounded">
+                    <div className="w-10 h-10 rounded-full border-4 border-gray-200 border-t-gray-400 animate-spin" />
+                </div>
+            )}
+            {error && (
+                <div className="absolute inset-0 flex items-center justify-center bg-gray-50 text-gray-400 text-xs">
+                    Failed to load
+                </div>
+            )}
+            <img
+                src={src}
+                alt={alt}
+                className={`max-w-full max-h-full object-contain transition-opacity duration-300 ${loaded ? 'opacity-100' : 'opacity-0'}`}
+                style={{ width: '100%', height: '100%' }}
+                onLoad={() => setLoaded(true)}
+                onError={() => { setError(true); setLoaded(true); }}
+                loading="lazy"
+            />
+        </div>
+    );
+}
+
 // --- Image Modal Component ---
 function ImageModal({
     pvidItem,
@@ -344,31 +377,19 @@ function ImageModal({
                                 <div className="flex flex-col h-full bg-gray-50 rounded-lg overflow-hidden border border-gray-100">
                                     <div className="bg-gray-100 px-3 py-1 text-[10px] font-bold text-gray-500 uppercase text-center tracking-wider">Original</div>
                                     <div className="flex-1 relative flex items-center justify-center p-2">
-                                        <img
-                                            src={selectedImage.image_url}
-                                            alt="Original"
-                                            className="max-w-full max-h-full object-contain"
-                                        />
+                                        <LazyImage src={selectedImage.image_url} alt="Original" />
                                     </div>
                                 </div>
                                 <div className="flex flex-col h-full bg-gray-50 rounded-lg overflow-hidden border border-gray-100">
                                     <div className="bg-blue-50 px-3 py-1 text-[10px] font-bold text-blue-600 uppercase text-center tracking-wider">3x4 Variant</div>
                                     <div className="flex-1 relative flex items-center justify-center p-2">
-                                        <img
-                                            src={selectedImage.image_link_3x4!}
-                                            alt="3x4 Variant"
-                                            className="max-w-full max-h-full object-contain"
-                                        />
+                                        <LazyImage src={selectedImage.image_link_3x4!} alt="3x4 Variant" />
                                     </div>
                                 </div>
                             </div>
                         ) : (
                             // Single Image View
-                            <img
-                                src={selectedImage.image_url}
-                                alt="Preview"
-                                className="max-w-full max-h-full object-contain"
-                            />
+                            <LazyImage src={selectedImage.image_url} alt="Preview" />
                         )}
 
                         {/* Navigation Arrows */}
@@ -691,10 +712,12 @@ function Dashboard() {
         shouldFetchImages ? `${API_BASE}/images?${buildQuery()}` : null,
         fetcher,
         {
-            refreshInterval: canWrite ? 10000 : 30000,  // reviewer=10s, viewer=30s (Firestore quota)
-            dedupingInterval: 3000,
+            // Poll every 30s so changes by OTHER users (reviewers/admins) are picked up
+            // without hammering Firestore. Own actions use optimistic updates (no refetch).
+            refreshInterval: 30000,
+            dedupingInterval: 5000,
             revalidateOnFocus: false,
-            revalidateOnReconnect: false,
+            revalidateOnReconnect: true,  // re-sync after coming back online
             keepPreviousData: true
         }
     );
