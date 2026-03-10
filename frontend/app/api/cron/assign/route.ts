@@ -19,12 +19,12 @@ export async function GET(request: Request) {
     }
 
     try {
-        const res = await fetch(`${apiBase}/admin/assignments/regenerate`, {
-            method: 'POST',
+        // /admin/assignments/today calls ensure_today_assignments() which is idempotent:
+        // creates today's assignment doc if it doesn't exist, returns existing one if it does.
+        // This is exactly what we want from a scheduled cron — no force flag needed.
+        const res = await fetch(`${apiBase}/admin/assignments/today`, {
+            method: 'GET',
             headers: { 'Content-Type': 'application/json' },
-            // force: false — only generates if no assignment doc exists for today yet
-            // (idempotent: won't overwrite an admin's manual regeneration)
-            body: JSON.stringify({ force: false }),
         });
 
         if (!res.ok) {
