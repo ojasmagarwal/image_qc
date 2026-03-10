@@ -3,10 +3,14 @@ import { NextResponse } from 'next/server';
 // Called by Vercel Cron at 11:30 AM IST (06:00 UTC) every day.
 // Triggers today's PVID assignment generation on the backend.
 export async function GET(request: Request) {
-    // Verify the request is coming from Vercel Cron (not a random caller)
-    const authHeader = request.headers.get('authorization');
-    if (authHeader !== `Bearer ${process.env.CRON_SECRET}`) {
-        return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+    // Verify the request is from Vercel Cron when CRON_SECRET is configured.
+    // If the env var is not set yet (e.g. first deployment), skip the check.
+    const cronSecret = process.env.CRON_SECRET;
+    if (cronSecret) {
+        const authHeader = request.headers.get('authorization');
+        if (authHeader !== `Bearer ${cronSecret}`) {
+            return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+        }
     }
 
     const apiBase = process.env.NEXT_PUBLIC_API_BASE_URL;
