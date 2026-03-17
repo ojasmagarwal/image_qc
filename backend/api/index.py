@@ -9,7 +9,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 from typing import Optional, List, Any, Dict
 
-from fastapi import FastAPI, HTTPException, Query, APIRouter
+from fastapi import FastAPI, HTTPException, Query, APIRouter, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, EmailStr
 from google.cloud import bigquery
@@ -28,24 +28,23 @@ BQ_DATASET = os.environ.get("BQ_DATASET", "image_qc")
 FIRESTORE_PROJECT = os.environ.get("FIRESTORE_PROJECT", "temporary-471207")
 GCP_SA_JSON = os.environ.get("GCP_SA_JSON")
 # CORS Setup
-CORS_ORIGINS_STR = os.environ.get("CORS_ORIGINS", "")
-if CORS_ORIGINS_STR:
-    allow_origins = [origin.strip() for origin in CORS_ORIGINS_STR.split(",")]
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=allow_origins,
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
+cors_env = os.environ.get("CORS_ORIGINS", "") or os.environ.get("CORS_SECRET", "")
+if cors_env:
+    allow_origins = [origin.strip() for origin in cors_env.split(",") if origin.strip()]
 else:
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origin_regex=".*",
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
+    allow_origins = [
+        "https://zepto-image-qc.vercel.app",
+        "http://localhost:3000"
+    ]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=allow_origins,
+    allow_origin_regex=r"^https://.*\.vercel\.app$",
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("image_qc_api")
@@ -843,6 +842,10 @@ def toggle_remark(req: RemarkRequest):
         content={"status": "ok", "event_id": event_id},
         headers={"Cache-Control": "no-store"}
     )
+
+@router.get("/debug/headers")
+def debug_headers(request: Request):
+    return dict(request.headers)
 
 @router.get("/me/role", response_model=RoleResponse)
 def get_role(email: str):
